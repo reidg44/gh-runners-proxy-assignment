@@ -1,0 +1,25 @@
+github:
+  repository_url: "https://github.com/reidg44/gh-runners-proxy-assignment"
+  scale_set_name: "gh-proxy-runner-scaleset"
+  runner_label: "gh-proxy-runner"
+  runner_group: "default"
+
+runner:
+  image: "ghcr.io/actions/actions-runner:latest"
+  max_runners: 10
+  work_folder: "_work"
+
+profiles:
+  high-cpu:
+    cpus: "4"
+    memory: "8g"
+    match_patterns: ["high-cpu*"]
+  low-cpu:
+    cpus: "1"
+    memory: "2g"
+    match_patterns: ["low-cpu*"]
+
+default_profile: "low-cpu"
+
+proxy:
+  listen_addr: ":8080"

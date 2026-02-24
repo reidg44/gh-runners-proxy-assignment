@@ -9,13 +9,17 @@
       "ZSH_IN_DOCKER_VERSION": "1.2.0"
     }
   },
+  "features": {
+    "ghcr.io/devcontainers/features/docker-in-docker:2": {}
+  },
   "customizations": {
     "vscode": {
       "extensions": [
         "anthropic.claude-code",
         "dbaeumer.vscode-eslint",
         "esbenp.prettier-vscode",
-        "eamodio.gitlens"
+        "eamodio.gitlens",
+        "golang.go"
       ],
       "settings": {
         "editor.formatOnSave": true,
@@ -36,6 +40,7 @@
       }
     }
   },
+  "privileged": true,
   "remoteUser": "node",
   "mounts": [
     "source=claude-code-bashhistory-${devcontainerId},target=/commandhistory,type=volume",

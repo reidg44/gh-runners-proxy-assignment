@@ -4,6 +4,7 @@ ARG TZ
 ENV TZ="$TZ"
 
 ARG CLAUDE_CODE_VERSION=latest
+ARG GO_VERSION=1.24.0
 
 # Install basic development tools
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -20,7 +21,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   jq \
   nano \
   vim \
+  wget \
+  ca-certificates \
   && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Install Go
+RUN ARCH=$(dpkg --print-architecture) && \
+  wget -q "https://go.dev/dl/go${GO_VERSION}.linux-${ARCH}.tar.gz" && \
+  tar -C /usr/local -xzf "go${GO_VERSION}.linux-${ARCH}.tar.gz" && \
+  rm "go${GO_VERSION}.linux-${ARCH}.tar.gz"
+ENV PATH=$PATH:/usr/local/go/bin:/home/node/go/bin
+ENV GOPATH=/home/node/go
+ENV GOTOOLCHAIN=auto
 
 # Ensure default node user has access to /usr/local/share
 RUN mkdir -p /usr/local/share/npm-global && \
@@ -48,6 +60,10 @@ RUN ARCH=$(dpkg --print-architecture) && \
   wget "https://github.com/dandavison/delta/releases/download/${GIT_DELTA_VERSION}/git-delta_${GIT_DELTA_VERSION}_${ARCH}.deb" && \
   sudo dpkg -i "git-delta_${GIT_DELTA_VERSION}_${ARCH}.deb" && \
   rm "git-delta_${GIT_DELTA_VERSION}_${ARCH}.deb"
+
+# Grant node user passwordless sudo (needed for docker-in-docker)
+RUN echo "node ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/node \
+  && chmod 0440 /etc/sudoers.d/node
 
 # Set up non-root user
 USER node
