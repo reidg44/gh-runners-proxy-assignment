@@ -6,19 +6,67 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 This project implements intelligent GitHub Actions runner assignment via a proxy system. The core problem: GitHub Actions matrix workflows randomly assign runners with the same label — there's no native way to route jobs to specific runners based on hardware requirements (e.g., high-CPU vs low-CPU).
 
-### Two-Component Architecture
+### Architecture
 
-1. **Listener Server** — Uses the [actions/scaleset Go SDK](https://github.com/actions/scaleset) to receive job events from GitHub and spin up JIT (just-in-time) runners matching expected job configurations.
-2. **Proxy Server** — Routes job requests to appropriate runners based on hardware specs, acting as an intermediary that manipulates traffic to self-hosted runners.
+Two components run together (combined in `cmd/all/main.go`):
 
-### Flow
+1. **Listener/Scaler** (`internal/scaler/`) — Uses the [actions/scaleset Go SDK](https://github.com/actions/scaleset) `MessageSessionClient` directly (not `listener.Run()`) to receive per-job details. Classifies jobs by display name using glob patterns, generates JIT runner configs, and provisions Docker containers with matching CPU/memory limits.
+2. **HTTP CONNECT Proxy** (`internal/proxy/`) — Intercepts all runner-to-GitHub HTTPS traffic. Identifies runners by container IP via the shared state store and logs runner name, profile, job name, and target host for every tunnel.
 
-When N jobs trigger in parallel with varying resource needs, the listener provisions runners with matching specs, and the proxy ensures each job lands on the correct runner (e.g., a high-CPU job goes to a powerful runner, not a standard one).
+### Internal Packages
+
+- **`internal/config/`** — Loads and validates `config.yaml`. Builds ordered profile list for deterministic glob matching. Checks that `default_profile` references an existing profile.
+- **`internal/classifier/`** — Matches `JobDisplayName` against each profile's `match_patterns` using `filepath.Match` (glob). First match wins; falls back to `default_profile`.
+- **`internal/state/`** — Thread-safe (`sync.RWMutex`) store tracking `RunnerInfo`: name, container ID/IP, profile, job ID/name, status (idle/busy/completed). Lookup by name, IP, or job ID.
+- **`internal/runner/`** — Docker container lifecycle. Creates containers with `NanoCPUs`/`Memory` limits on a dedicated bridge network (`gh-proxy-runners`). Passes JIT config and proxy URL as env vars. Image: `ghcr.io/actions/actions-runner:latest` with `Cmd: ["/home/runner/run.sh"]` and `User: "runner"`.
+- **`internal/scaler/`** — Custom message loop processing `JobAssigned`, `JobStarted`, `JobCompleted` messages. Uses `Statistics.TotalAssignedJobs` from each message to detect orphaned jobs (when GitHub assigns a different job to a runner than intended) and provisions additional runners to fill the gap.
+
+### Key Design Decisions
+
+- **Custom message loop** — The SDK's `listener.Run()` only exposes `HandleDesiredRunnerCount(count)` — a number, not individual job details. We use `MessageSessionClient.GetMessage()` directly to inspect `JobDisplayName` and classify each job.
+- **Statistics-based reconciliation** — JIT configs don't lock runners to specific jobs. GitHub may send any queued job to any registered runner. The scaler tracks `Statistics.TotalAssignedJobs` and provisions additional runners when there's a deficit vs active runner count.
+- **Message acknowledgment before processing** — Matches the official listener pattern. `DeleteMessage` is called before handling events to prevent re-delivery loops.
+- **409 conflict handling** — On stale session (409), the scale set is deleted and recreated to get a fresh session.
+
+## Build and Run Commands
+
+```bash
+# Build
+go build -o bin/gh-proxy ./cmd/all
+
+# Run all tests
+go test ./internal/...
+
+# Run specific package tests
+go test ./internal/scaler/...
+go test ./internal/classifier/...
+
+# Start the system (requires Docker running + GITHUB_TOKEN set)
+export GITHUB_TOKEN=$(grep GH_TOKEN .env | cut -d= -f2)
+./bin/gh-proxy --config config.yaml
+
+# Trigger test workflows
+gh workflow run test-case        # 8 jobs: 1 high-cpu, 7 low-cpu
+gh workflow run test-case-10     # 10 jobs: 1 high-cpu at #4, 9 low-cpu
+```
+
+## Configuration
+
+`config.yaml` maps job display name glob patterns to resource profiles. Profiles are matched in order — first match wins.
+
+The `GITHUB_TOKEN` env var must be set (PAT with `repo` + `admin:org` scopes). The `.env` file in the repo root stores it as `GH_TOKEN`.
 
 ## Test Infrastructure
 
-The test case workflow (`.github/workflows/test-case.yaml`) is manually triggered (`workflow_dispatch`) and runs 8 parallel jobs — 1 `high-cpu` and 7 `low-cpu-*` — all using the `["gh-proxy-runner"]` label. Verification is done through GitHub Actions logs confirming correct runner assignments.
+Two manually-triggered workflows (`workflow_dispatch`):
 
-## Current State
+- **`test-case.yaml`** — 8 parallel jobs: 1 `high-cpu` + 7 `low-cpu-*`, all using `["gh-proxy-runner"]` label
+- **`test-case-10.yaml`** — 10 parallel jobs: 1 `high-cpu` (at position #4) + 9 `low-cpu-*`
 
-The project is in the planning/infrastructure stage. No implementation code exists yet. The `.gitignore` is configured for macOS and Python environments.
+Verification: check logs for `runner_name=runner-high-cpu-*` on high-cpu jobs and `runner_name=runner-low-cpu-*` on low-cpu jobs. Zero mismatches = success.
+
+## Environment
+
+- **Devcontainer** — Dockerfile installs Go + Docker CLI. `devcontainer.json` enables docker-in-docker feature and privileged mode. Passwordless sudo for the `node` user.
+- **Go version** — `go 1.25.3` in `go.mod` (uses `GOTOOLCHAIN=auto` to auto-download)
+- **Key dependencies** — `github.com/actions/scaleset v0.1.0`, `github.com/docker/docker v28.5.2`, `github.com/spf13/cobra`, `gopkg.in/yaml.v3`

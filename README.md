@@ -1,21 +1,192 @@
 # gh-runners-proxy-assignment
 
-## Problem Statement
+Intelligent job-to-runner routing for GitHub Actions. Routes matrix workflow jobs to Docker containers with matching hardware profiles (CPU, memory) based on job display names — something GitHub doesn't natively support.
 
-A user creates a matrix GitHub Actions workflow with multiple jobs. Each job uses the same self-hosted runner label, so GitHub randomly assigns available runners to jobs. The user wants to control which runner executes each job, but GitHub's API does not provide a way to specify this. For example, if a user has 5 runners with different hardware specs, they want to ensure that jobs requiring high CPU resources are assigned to the appropriate runners, rather than relying on random assignment.
+## Problem
 
-## Proposed Solution
+GitHub Actions matrix workflows with self-hosted runners randomly assign jobs to any runner with a matching label. There's no way to say "this job needs 4 CPUs" and have GitHub pick the right runner. If you have jobs with different resource requirements sharing the same label, assignment is a coin flip.
 
-<https://github.com/actions/scaleset> is an open source Go SDK for Github Actions. It allows users to listen for jobs, generate just-in-time configurations.
+## Solution
 
-We want to begin by creating a listener server using this SDK that can receive job events from GitHub. When a job is triggered, this server will spin up new runners to match the expected configurations for the job.
+This project sits between GitHub and the runners. It listens for job events via the [actions/scaleset SDK](https://github.com/actions/scaleset), classifies each job by its display name using glob patterns, and provisions a JIT (just-in-time) Docker container with the right CPU/memory limits. An HTTP CONNECT proxy logs all runner-to-GitHub traffic with runner/profile identification.
 
-Next, we will implement a proxy server that can route job requests to the appropriate runners based on their configurations. This proxy will act as an intermediary between GitHub and the self-hosted runners, allowing us to control which runner executes each job.
+### How it works
 
-For example, if 2 jobs are triggered in parallel, but one requires high CPU resources and the other does not, the proxy server can route the high CPU job to a runner with more powerful hardware, while routing the other job to a less powerful runner. It will do so by manipulating traffic to the self-hosted runners, ensuring that each job is executed on the appropriate runner based on its requirements.
+1. GitHub sends a `JobAssigned` message for each queued job
+2. The **classifier** matches the job's display name against glob patterns in `config.yaml` (e.g., `high-cpu*` → 4 CPUs, `low-cpu*` → 1 CPU)
+3. The **scaler** generates a JIT runner config and starts a Docker container with the matching resource profile
+4. The runner registers with GitHub, executes its job, and exits
+5. The **proxy** intercepts all HTTPS traffic from runners, identifying each by container IP and logging the runner name, profile, and target host
+6. On job completion, the container is stopped and removed
 
-## Tests
+### Architecture
 
-The workflow `.github/workflows/test-case.yaml` runs 8 jobs in parallel, each with the same label. One of the jobs is labeled high-cpu and the others are labeled low-cpu. The listener server will spin up 8 runners, 1 with high CPU resources and 7 with low CPU resources. The proxy server will route the high-cpu job to the runner with high CPU resources, while routing the low-cpu jobs to the runners with low CPU resources. We can verify that the jobs are executed on the correct runners by checking the logs and runner assignments in GitHub Actions.
+```
+GitHub Actions
+     │
+     ▼
+┌─────────────┐    JobAssigned/Started/Completed messages
+│  Scaleset    │◄──────────────────────────────────────────
+│  SDK         │
+└──────┬──────┘
+       │ classify job name → profile
+       ▼
+┌─────────────┐    JIT config + docker create
+│  Runner      │──────────────────────────────►  Docker containers
+│  Provisioner │                                 (CPU/mem limits)
+└──────────────┘                                      │
+                                                      │ HTTPS traffic
+                                                      ▼
+                                                ┌───────────┐
+                                                │  HTTP      │
+                                                │  CONNECT   │
+                                                │  Proxy     │
+                                                └───────────┘
+```
 
-Once we can reliabily route the jobs to the correct runners on multiple runs, we can assume we have successfully implemented the solution.
+## Project Structure
+
+```
+cmd/
+  all/main.go              Combined entry point (listener + proxy)
+  listener/main.go         Listener-only entry point
+  proxy/main.go            Proxy-only entry point
+internal/
+  classifier/              Job display name → profile matching (glob)
+  config/                  YAML config loading and validation
+  proxy/                   HTTP CONNECT proxy with runner identification
+  runner/                  Docker container lifecycle (create, stop, network)
+  scaler/                  Custom message loop, job dispatch, reconciliation
+  state/                   Thread-safe runner state store
+config.yaml                Job-to-profile mapping configuration
+.github/workflows/
+  test-case.yaml           8-job test workflow (1 high-cpu, 7 low-cpu)
+  test-case-10.yaml        10-job test workflow (1 high-cpu at #4, 9 low-cpu)
+```
+
+## Configuration
+
+`config.yaml` maps job display name patterns to resource profiles:
+
+```yaml
+github:
+  repository_url: "https://github.com/your-org/your-repo"
+  scale_set_name: "gh-proxy-runner-scaleset"
+  runner_label: "gh-proxy-runner"
+  runner_group: "default"
+
+runner:
+  image: "ghcr.io/actions/actions-runner:latest"
+  max_runners: 10
+  work_folder: "_work"
+
+profiles:
+  high-cpu:
+    cpus: "4"
+    memory: "8g"
+    match_patterns: ["high-cpu*"]
+  low-cpu:
+    cpus: "1"
+    memory: "2g"
+    match_patterns: ["low-cpu*"]
+
+default_profile: "low-cpu"
+
+proxy:
+  listen_addr: ":8080"
+```
+
+**Profiles** are matched in the order they appear. First matching glob wins. Jobs that don't match any pattern get the `default_profile`.
+
+## Prerequisites
+
+- **Docker** — must be running (the devcontainer uses docker-in-docker)
+- **Go 1.22+** — included in the devcontainer
+- **GitHub PAT** — with `repo` and `admin:org` scopes, stored in `.env` as `GH_TOKEN`
+
+The devcontainer is pre-configured with Go, Docker-in-Docker, and privileged mode. Opening this repo in VS Code with the Dev Containers extension will set everything up.
+
+## Building
+
+```bash
+go build -o bin/gh-proxy ./cmd/all
+```
+
+## Running
+
+```bash
+# Set the GitHub token
+export GITHUB_TOKEN=$(grep GH_TOKEN .env | cut -d= -f2)
+
+# Start the combined listener + proxy
+./bin/gh-proxy --config config.yaml
+```
+
+The system will:
+1. Start the HTTP CONNECT proxy on the configured port (`:8080`)
+2. Connect to GitHub and create/reuse a runner scale set
+3. Pull the runner Docker image
+4. Create a dedicated bridge network (`gh-proxy-runners`)
+5. Begin polling for job messages
+
+## Testing
+
+Two test workflows are included. Both use `workflow_dispatch` (manual trigger).
+
+### test-case (8 jobs)
+
+1 `high-cpu` + 7 `low-cpu-*` jobs, all with the `["gh-proxy-runner"]` label.
+
+```bash
+# With the system running:
+gh workflow run test-case
+gh run watch  # watch it complete
+```
+
+### test-case-10 (10 jobs)
+
+1 `high-cpu` (at position #4) + 9 `low-cpu-*` jobs.
+
+```bash
+gh workflow run test-case-10
+gh run watch
+```
+
+### Verifying correct routing
+
+Check the logs for profile assignments:
+
+```bash
+# Every completed job shows its runner name and profile
+grep "job completed.*result=succeeded" /tmp/gh-proxy.log
+
+# Verify high-cpu jobs always land on high-cpu runners
+grep "job completed.*high-cpu.*result=succeeded" /tmp/gh-proxy.log
+# Should show: runner_name=runner-high-cpu-*
+
+# Verify low-cpu jobs always land on low-cpu runners
+grep "job completed.*low-cpu.*result=succeeded" /tmp/gh-proxy.log
+# Should show: runner_name=runner-low-cpu-*
+```
+
+The proxy also logs every HTTPS tunnel with runner identification:
+
+```
+CONNECT tunnel runner_name=runner-high-cpu-xxx profile=high-cpu target=github.com:443
+```
+
+### Running unit tests
+
+```bash
+go test ./internal/...
+```
+
+## Key Design Decisions
+
+**Custom message loop instead of `listener.Run()`** — The SDK's built-in listener only exposes `HandleDesiredRunnerCount(count int)`, which gives a number, not per-job details. We use `MessageSessionClient.GetMessage()` directly to inspect `JobDisplayName` from each `JobAssigned` message and classify jobs before provisioning.
+
+**Statistics-based reconciliation** — GitHub may assign a different job to a runner than the one from the `JobAssigned` message (JIT configs don't lock runners to specific jobs). The scaler uses `Statistics.TotalAssignedJobs` from each message to detect orphaned jobs and provision additional runners to fill the gap.
+
+**JIT runners** — Each runner is ephemeral. It registers with GitHub, runs one job, and exits. The container is stopped and removed after job completion.
+
+**Bridge network** — All runner containers join a dedicated Docker bridge network. The proxy is reachable via the gateway IP, which is passed to containers as `http_proxy`/`https_proxy`.
