@@ -1,266 +1,97 @@
 name: test-case-10
 permissions:
- contents: read
+  contents: read
 on:
- workflow_dispatch:
+  workflow_dispatch:
 jobs:
- low-cpu-1:
-  runs-on: ["gh-proxy-runner"]
-  steps:
-   - name: Report resources
-     run: |
-      if [ -f /sys/fs/cgroup/cpu.max ]; then
-        read QUOTA PERIOD < /sys/fs/cgroup/cpu.max
-        if [ "$QUOTA" != "max" ]; then CPUS=$(awk "BEGIN {printf \"%.1f\", $QUOTA / $PERIOD}"); else CPUS=$(nproc); fi
-      elif [ -f /sys/fs/cgroup/cpu/cpu.cfs_quota_us ]; then
-        QUOTA=$(cat /sys/fs/cgroup/cpu/cpu.cfs_quota_us); PERIOD=$(cat /sys/fs/cgroup/cpu/cpu.cfs_period_us)
-        if [ "$QUOTA" != "-1" ]; then CPUS=$(awk "BEGIN {printf \"%.1f\", $QUOTA / $PERIOD}"); else CPUS=$(nproc); fi
-      else CPUS=$(nproc); fi
-      if [ -f /sys/fs/cgroup/memory.max ]; then
-        MEM_BYTES=$(cat /sys/fs/cgroup/memory.max)
-        if [ "$MEM_BYTES" = "max" ]; then MEM_DISPLAY="unlimited"; else MEM_DISPLAY="$(awk "BEGIN {printf \"%.1f GB\", $MEM_BYTES / 1073741824}")"; fi
-      elif [ -f /sys/fs/cgroup/memory/memory.limit_in_bytes ]; then
-        MEM_BYTES=$(cat /sys/fs/cgroup/memory/memory.limit_in_bytes); MEM_DISPLAY="$(awk "BEGIN {printf \"%.1f GB\", $MEM_BYTES / 1073741824}")"
-      else MEM_DISPLAY="unknown"; fi
-      RUNNER_NAME=$(hostname); JOB_NAME="${{ github.job }}"
-      if echo "$JOB_NAME" | grep -q "^high-cpu"; then EXPECTED_CPUS="4.0"; EXPECTED_MEM="8.0 GB"; else EXPECTED_CPUS="1.0"; EXPECTED_MEM="2.0 GB"; fi
-      if [ "$CPUS" = "$EXPECTED_CPUS" ]; then CPU_STATUS="correct"; else CPU_STATUS="WRONG (expected $EXPECTED_CPUS)"; fi
-      if [ "$MEM_DISPLAY" = "$EXPECTED_MEM" ]; then MEM_STATUS="correct"; else MEM_STATUS="WRONG (expected $EXPECTED_MEM)"; fi
-      { echo "### $JOB_NAME"; echo ""; echo "| Metric | Value | Status |"; echo "|--------|-------|--------|"
-        echo "| **Runner** | \`${RUNNER_NAME}\` | |"; echo "| **CPU Limit** | ${CPUS} CPUs | ${CPU_STATUS} |"
-        echo "| **Memory Limit** | ${MEM_DISPLAY} | ${MEM_STATUS} |"; echo ""; } >> "$GITHUB_STEP_SUMMARY"
-      echo "Job: $JOB_NAME | Runner: $RUNNER_NAME | CPUs: $CPUS | Memory: $MEM_DISPLAY"
- low-cpu-2:
-  runs-on: ["gh-proxy-runner"]
-  steps:
-   - name: Report resources
-     run: |
-      if [ -f /sys/fs/cgroup/cpu.max ]; then
-        read QUOTA PERIOD < /sys/fs/cgroup/cpu.max
-        if [ "$QUOTA" != "max" ]; then CPUS=$(awk "BEGIN {printf \"%.1f\", $QUOTA / $PERIOD}"); else CPUS=$(nproc); fi
-      elif [ -f /sys/fs/cgroup/cpu/cpu.cfs_quota_us ]; then
-        QUOTA=$(cat /sys/fs/cgroup/cpu/cpu.cfs_quota_us); PERIOD=$(cat /sys/fs/cgroup/cpu/cpu.cfs_period_us)
-        if [ "$QUOTA" != "-1" ]; then CPUS=$(awk "BEGIN {printf \"%.1f\", $QUOTA / $PERIOD}"); else CPUS=$(nproc); fi
-      else CPUS=$(nproc); fi
-      if [ -f /sys/fs/cgroup/memory.max ]; then
-        MEM_BYTES=$(cat /sys/fs/cgroup/memory.max)
-        if [ "$MEM_BYTES" = "max" ]; then MEM_DISPLAY="unlimited"; else MEM_DISPLAY="$(awk "BEGIN {printf \"%.1f GB\", $MEM_BYTES / 1073741824}")"; fi
-      elif [ -f /sys/fs/cgroup/memory/memory.limit_in_bytes ]; then
-        MEM_BYTES=$(cat /sys/fs/cgroup/memory/memory.limit_in_bytes); MEM_DISPLAY="$(awk "BEGIN {printf \"%.1f GB\", $MEM_BYTES / 1073741824}")"
-      else MEM_DISPLAY="unknown"; fi
-      RUNNER_NAME=$(hostname); JOB_NAME="${{ github.job }}"
-      if echo "$JOB_NAME" | grep -q "^high-cpu"; then EXPECTED_CPUS="4.0"; EXPECTED_MEM="8.0 GB"; else EXPECTED_CPUS="1.0"; EXPECTED_MEM="2.0 GB"; fi
-      if [ "$CPUS" = "$EXPECTED_CPUS" ]; then CPU_STATUS="correct"; else CPU_STATUS="WRONG (expected $EXPECTED_CPUS)"; fi
-      if [ "$MEM_DISPLAY" = "$EXPECTED_MEM" ]; then MEM_STATUS="correct"; else MEM_STATUS="WRONG (expected $EXPECTED_MEM)"; fi
-      { echo "### $JOB_NAME"; echo ""; echo "| Metric | Value | Status |"; echo "|--------|-------|--------|"
-        echo "| **Runner** | \`${RUNNER_NAME}\` | |"; echo "| **CPU Limit** | ${CPUS} CPUs | ${CPU_STATUS} |"
-        echo "| **Memory Limit** | ${MEM_DISPLAY} | ${MEM_STATUS} |"; echo ""; } >> "$GITHUB_STEP_SUMMARY"
-      echo "Job: $JOB_NAME | Runner: $RUNNER_NAME | CPUs: $CPUS | Memory: $MEM_DISPLAY"
- low-cpu-3:
-  runs-on: ["gh-proxy-runner"]
-  steps:
-   - name: Report resources
-     run: |
-      if [ -f /sys/fs/cgroup/cpu.max ]; then
-        read QUOTA PERIOD < /sys/fs/cgroup/cpu.max
-        if [ "$QUOTA" != "max" ]; then CPUS=$(awk "BEGIN {printf \"%.1f\", $QUOTA / $PERIOD}"); else CPUS=$(nproc); fi
-      elif [ -f /sys/fs/cgroup/cpu/cpu.cfs_quota_us ]; then
-        QUOTA=$(cat /sys/fs/cgroup/cpu/cpu.cfs_quota_us); PERIOD=$(cat /sys/fs/cgroup/cpu/cpu.cfs_period_us)
-        if [ "$QUOTA" != "-1" ]; then CPUS=$(awk "BEGIN {printf \"%.1f\", $QUOTA / $PERIOD}"); else CPUS=$(nproc); fi
-      else CPUS=$(nproc); fi
-      if [ -f /sys/fs/cgroup/memory.max ]; then
-        MEM_BYTES=$(cat /sys/fs/cgroup/memory.max)
-        if [ "$MEM_BYTES" = "max" ]; then MEM_DISPLAY="unlimited"; else MEM_DISPLAY="$(awk "BEGIN {printf \"%.1f GB\", $MEM_BYTES / 1073741824}")"; fi
-      elif [ -f /sys/fs/cgroup/memory/memory.limit_in_bytes ]; then
-        MEM_BYTES=$(cat /sys/fs/cgroup/memory/memory.limit_in_bytes); MEM_DISPLAY="$(awk "BEGIN {printf \"%.1f GB\", $MEM_BYTES / 1073741824}")"
-      else MEM_DISPLAY="unknown"; fi
-      RUNNER_NAME=$(hostname); JOB_NAME="${{ github.job }}"
-      if echo "$JOB_NAME" | grep -q "^high-cpu"; then EXPECTED_CPUS="4.0"; EXPECTED_MEM="8.0 GB"; else EXPECTED_CPUS="1.0"; EXPECTED_MEM="2.0 GB"; fi
-      if [ "$CPUS" = "$EXPECTED_CPUS" ]; then CPU_STATUS="correct"; else CPU_STATUS="WRONG (expected $EXPECTED_CPUS)"; fi
-      if [ "$MEM_DISPLAY" = "$EXPECTED_MEM" ]; then MEM_STATUS="correct"; else MEM_STATUS="WRONG (expected $EXPECTED_MEM)"; fi
-      { echo "### $JOB_NAME"; echo ""; echo "| Metric | Value | Status |"; echo "|--------|-------|--------|"
-        echo "| **Runner** | \`${RUNNER_NAME}\` | |"; echo "| **CPU Limit** | ${CPUS} CPUs | ${CPU_STATUS} |"
-        echo "| **Memory Limit** | ${MEM_DISPLAY} | ${MEM_STATUS} |"; echo ""; } >> "$GITHUB_STEP_SUMMARY"
-      echo "Job: $JOB_NAME | Runner: $RUNNER_NAME | CPUs: $CPUS | Memory: $MEM_DISPLAY"
- high-cpu:
-  runs-on: ["gh-proxy-runner"]
-  steps:
-   - name: Report resources
-     run: |
-      if [ -f /sys/fs/cgroup/cpu.max ]; then
-        read QUOTA PERIOD < /sys/fs/cgroup/cpu.max
-        if [ "$QUOTA" != "max" ]; then CPUS=$(awk "BEGIN {printf \"%.1f\", $QUOTA / $PERIOD}"); else CPUS=$(nproc); fi
-      elif [ -f /sys/fs/cgroup/cpu/cpu.cfs_quota_us ]; then
-        QUOTA=$(cat /sys/fs/cgroup/cpu/cpu.cfs_quota_us); PERIOD=$(cat /sys/fs/cgroup/cpu/cpu.cfs_period_us)
-        if [ "$QUOTA" != "-1" ]; then CPUS=$(awk "BEGIN {printf \"%.1f\", $QUOTA / $PERIOD}"); else CPUS=$(nproc); fi
-      else CPUS=$(nproc); fi
-      if [ -f /sys/fs/cgroup/memory.max ]; then
-        MEM_BYTES=$(cat /sys/fs/cgroup/memory.max)
-        if [ "$MEM_BYTES" = "max" ]; then MEM_DISPLAY="unlimited"; else MEM_DISPLAY="$(awk "BEGIN {printf \"%.1f GB\", $MEM_BYTES / 1073741824}")"; fi
-      elif [ -f /sys/fs/cgroup/memory/memory.limit_in_bytes ]; then
-        MEM_BYTES=$(cat /sys/fs/cgroup/memory/memory.limit_in_bytes); MEM_DISPLAY="$(awk "BEGIN {printf \"%.1f GB\", $MEM_BYTES / 1073741824}")"
-      else MEM_DISPLAY="unknown"; fi
-      RUNNER_NAME=$(hostname); JOB_NAME="${{ github.job }}"
-      if echo "$JOB_NAME" | grep -q "^high-cpu"; then EXPECTED_CPUS="4.0"; EXPECTED_MEM="8.0 GB"; else EXPECTED_CPUS="1.0"; EXPECTED_MEM="2.0 GB"; fi
-      if [ "$CPUS" = "$EXPECTED_CPUS" ]; then CPU_STATUS="correct"; else CPU_STATUS="WRONG (expected $EXPECTED_CPUS)"; fi
-      if [ "$MEM_DISPLAY" = "$EXPECTED_MEM" ]; then MEM_STATUS="correct"; else MEM_STATUS="WRONG (expected $EXPECTED_MEM)"; fi
-      { echo "### $JOB_NAME"; echo ""; echo "| Metric | Value | Status |"; echo "|--------|-------|--------|"
-        echo "| **Runner** | \`${RUNNER_NAME}\` | |"; echo "| **CPU Limit** | ${CPUS} CPUs | ${CPU_STATUS} |"
-        echo "| **Memory Limit** | ${MEM_DISPLAY} | ${MEM_STATUS} |"; echo ""; } >> "$GITHUB_STEP_SUMMARY"
-      echo "Job: $JOB_NAME | Runner: $RUNNER_NAME | CPUs: $CPUS | Memory: $MEM_DISPLAY"
- low-cpu-4:
-  runs-on: ["gh-proxy-runner"]
-  steps:
-   - name: Report resources
-     run: |
-      if [ -f /sys/fs/cgroup/cpu.max ]; then
-        read QUOTA PERIOD < /sys/fs/cgroup/cpu.max
-        if [ "$QUOTA" != "max" ]; then CPUS=$(awk "BEGIN {printf \"%.1f\", $QUOTA / $PERIOD}"); else CPUS=$(nproc); fi
-      elif [ -f /sys/fs/cgroup/cpu/cpu.cfs_quota_us ]; then
-        QUOTA=$(cat /sys/fs/cgroup/cpu/cpu.cfs_quota_us); PERIOD=$(cat /sys/fs/cgroup/cpu/cpu.cfs_period_us)
-        if [ "$QUOTA" != "-1" ]; then CPUS=$(awk "BEGIN {printf \"%.1f\", $QUOTA / $PERIOD}"); else CPUS=$(nproc); fi
-      else CPUS=$(nproc); fi
-      if [ -f /sys/fs/cgroup/memory.max ]; then
-        MEM_BYTES=$(cat /sys/fs/cgroup/memory.max)
-        if [ "$MEM_BYTES" = "max" ]; then MEM_DISPLAY="unlimited"; else MEM_DISPLAY="$(awk "BEGIN {printf \"%.1f GB\", $MEM_BYTES / 1073741824}")"; fi
-      elif [ -f /sys/fs/cgroup/memory/memory.limit_in_bytes ]; then
-        MEM_BYTES=$(cat /sys/fs/cgroup/memory/memory.limit_in_bytes); MEM_DISPLAY="$(awk "BEGIN {printf \"%.1f GB\", $MEM_BYTES / 1073741824}")"
-      else MEM_DISPLAY="unknown"; fi
-      RUNNER_NAME=$(hostname); JOB_NAME="${{ github.job }}"
-      if echo "$JOB_NAME" | grep -q "^high-cpu"; then EXPECTED_CPUS="4.0"; EXPECTED_MEM="8.0 GB"; else EXPECTED_CPUS="1.0"; EXPECTED_MEM="2.0 GB"; fi
-      if [ "$CPUS" = "$EXPECTED_CPUS" ]; then CPU_STATUS="correct"; else CPU_STATUS="WRONG (expected $EXPECTED_CPUS)"; fi
-      if [ "$MEM_DISPLAY" = "$EXPECTED_MEM" ]; then MEM_STATUS="correct"; else MEM_STATUS="WRONG (expected $EXPECTED_MEM)"; fi
-      { echo "### $JOB_NAME"; echo ""; echo "| Metric | Value | Status |"; echo "|--------|-------|--------|"
-        echo "| **Runner** | \`${RUNNER_NAME}\` | |"; echo "| **CPU Limit** | ${CPUS} CPUs | ${CPU_STATUS} |"
-        echo "| **Memory Limit** | ${MEM_DISPLAY} | ${MEM_STATUS} |"; echo ""; } >> "$GITHUB_STEP_SUMMARY"
-      echo "Job: $JOB_NAME | Runner: $RUNNER_NAME | CPUs: $CPUS | Memory: $MEM_DISPLAY"
- low-cpu-5:
-  runs-on: ["gh-proxy-runner"]
-  steps:
-   - name: Report resources
-     run: |
-      if [ -f /sys/fs/cgroup/cpu.max ]; then
-        read QUOTA PERIOD < /sys/fs/cgroup/cpu.max
-        if [ "$QUOTA" != "max" ]; then CPUS=$(awk "BEGIN {printf \"%.1f\", $QUOTA / $PERIOD}"); else CPUS=$(nproc); fi
-      elif [ -f /sys/fs/cgroup/cpu/cpu.cfs_quota_us ]; then
-        QUOTA=$(cat /sys/fs/cgroup/cpu/cpu.cfs_quota_us); PERIOD=$(cat /sys/fs/cgroup/cpu/cpu.cfs_period_us)
-        if [ "$QUOTA" != "-1" ]; then CPUS=$(awk "BEGIN {printf \"%.1f\", $QUOTA / $PERIOD}"); else CPUS=$(nproc); fi
-      else CPUS=$(nproc); fi
-      if [ -f /sys/fs/cgroup/memory.max ]; then
-        MEM_BYTES=$(cat /sys/fs/cgroup/memory.max)
-        if [ "$MEM_BYTES" = "max" ]; then MEM_DISPLAY="unlimited"; else MEM_DISPLAY="$(awk "BEGIN {printf \"%.1f GB\", $MEM_BYTES / 1073741824}")"; fi
-      elif [ -f /sys/fs/cgroup/memory/memory.limit_in_bytes ]; then
-        MEM_BYTES=$(cat /sys/fs/cgroup/memory/memory.limit_in_bytes); MEM_DISPLAY="$(awk "BEGIN {printf \"%.1f GB\", $MEM_BYTES / 1073741824}")"
-      else MEM_DISPLAY="unknown"; fi
-      RUNNER_NAME=$(hostname); JOB_NAME="${{ github.job }}"
-      if echo "$JOB_NAME" | grep -q "^high-cpu"; then EXPECTED_CPUS="4.0"; EXPECTED_MEM="8.0 GB"; else EXPECTED_CPUS="1.0"; EXPECTED_MEM="2.0 GB"; fi
-      if [ "$CPUS" = "$EXPECTED_CPUS" ]; then CPU_STATUS="correct"; else CPU_STATUS="WRONG (expected $EXPECTED_CPUS)"; fi
-      if [ "$MEM_DISPLAY" = "$EXPECTED_MEM" ]; then MEM_STATUS="correct"; else MEM_STATUS="WRONG (expected $EXPECTED_MEM)"; fi
-      { echo "### $JOB_NAME"; echo ""; echo "| Metric | Value | Status |"; echo "|--------|-------|--------|"
-        echo "| **Runner** | \`${RUNNER_NAME}\` | |"; echo "| **CPU Limit** | ${CPUS} CPUs | ${CPU_STATUS} |"
-        echo "| **Memory Limit** | ${MEM_DISPLAY} | ${MEM_STATUS} |"; echo ""; } >> "$GITHUB_STEP_SUMMARY"
-      echo "Job: $JOB_NAME | Runner: $RUNNER_NAME | CPUs: $CPUS | Memory: $MEM_DISPLAY"
- low-cpu-6:
-  runs-on: ["gh-proxy-runner"]
-  steps:
-   - name: Report resources
-     run: |
-      if [ -f /sys/fs/cgroup/cpu.max ]; then
-        read QUOTA PERIOD < /sys/fs/cgroup/cpu.max
-        if [ "$QUOTA" != "max" ]; then CPUS=$(awk "BEGIN {printf \"%.1f\", $QUOTA / $PERIOD}"); else CPUS=$(nproc); fi
-      elif [ -f /sys/fs/cgroup/cpu/cpu.cfs_quota_us ]; then
-        QUOTA=$(cat /sys/fs/cgroup/cpu/cpu.cfs_quota_us); PERIOD=$(cat /sys/fs/cgroup/cpu/cpu.cfs_period_us)
-        if [ "$QUOTA" != "-1" ]; then CPUS=$(awk "BEGIN {printf \"%.1f\", $QUOTA / $PERIOD}"); else CPUS=$(nproc); fi
-      else CPUS=$(nproc); fi
-      if [ -f /sys/fs/cgroup/memory.max ]; then
-        MEM_BYTES=$(cat /sys/fs/cgroup/memory.max)
-        if [ "$MEM_BYTES" = "max" ]; then MEM_DISPLAY="unlimited"; else MEM_DISPLAY="$(awk "BEGIN {printf \"%.1f GB\", $MEM_BYTES / 1073741824}")"; fi
-      elif [ -f /sys/fs/cgroup/memory/memory.limit_in_bytes ]; then
-        MEM_BYTES=$(cat /sys/fs/cgroup/memory/memory.limit_in_bytes); MEM_DISPLAY="$(awk "BEGIN {printf \"%.1f GB\", $MEM_BYTES / 1073741824}")"
-      else MEM_DISPLAY="unknown"; fi
-      RUNNER_NAME=$(hostname); JOB_NAME="${{ github.job }}"
-      if echo "$JOB_NAME" | grep -q "^high-cpu"; then EXPECTED_CPUS="4.0"; EXPECTED_MEM="8.0 GB"; else EXPECTED_CPUS="1.0"; EXPECTED_MEM="2.0 GB"; fi
-      if [ "$CPUS" = "$EXPECTED_CPUS" ]; then CPU_STATUS="correct"; else CPU_STATUS="WRONG (expected $EXPECTED_CPUS)"; fi
-      if [ "$MEM_DISPLAY" = "$EXPECTED_MEM" ]; then MEM_STATUS="correct"; else MEM_STATUS="WRONG (expected $EXPECTED_MEM)"; fi
-      { echo "### $JOB_NAME"; echo ""; echo "| Metric | Value | Status |"; echo "|--------|-------|--------|"
-        echo "| **Runner** | \`${RUNNER_NAME}\` | |"; echo "| **CPU Limit** | ${CPUS} CPUs | ${CPU_STATUS} |"
-        echo "| **Memory Limit** | ${MEM_DISPLAY} | ${MEM_STATUS} |"; echo ""; } >> "$GITHUB_STEP_SUMMARY"
-      echo "Job: $JOB_NAME | Runner: $RUNNER_NAME | CPUs: $CPUS | Memory: $MEM_DISPLAY"
- low-cpu-7:
-  runs-on: ["gh-proxy-runner"]
-  steps:
-   - name: Report resources
-     run: |
-      if [ -f /sys/fs/cgroup/cpu.max ]; then
-        read QUOTA PERIOD < /sys/fs/cgroup/cpu.max
-        if [ "$QUOTA" != "max" ]; then CPUS=$(awk "BEGIN {printf \"%.1f\", $QUOTA / $PERIOD}"); else CPUS=$(nproc); fi
-      elif [ -f /sys/fs/cgroup/cpu/cpu.cfs_quota_us ]; then
-        QUOTA=$(cat /sys/fs/cgroup/cpu/cpu.cfs_quota_us); PERIOD=$(cat /sys/fs/cgroup/cpu/cpu.cfs_period_us)
-        if [ "$QUOTA" != "-1" ]; then CPUS=$(awk "BEGIN {printf \"%.1f\", $QUOTA / $PERIOD}"); else CPUS=$(nproc); fi
-      else CPUS=$(nproc); fi
-      if [ -f /sys/fs/cgroup/memory.max ]; then
-        MEM_BYTES=$(cat /sys/fs/cgroup/memory.max)
-        if [ "$MEM_BYTES" = "max" ]; then MEM_DISPLAY="unlimited"; else MEM_DISPLAY="$(awk "BEGIN {printf \"%.1f GB\", $MEM_BYTES / 1073741824}")"; fi
-      elif [ -f /sys/fs/cgroup/memory/memory.limit_in_bytes ]; then
-        MEM_BYTES=$(cat /sys/fs/cgroup/memory/memory.limit_in_bytes); MEM_DISPLAY="$(awk "BEGIN {printf \"%.1f GB\", $MEM_BYTES / 1073741824}")"
-      else MEM_DISPLAY="unknown"; fi
-      RUNNER_NAME=$(hostname); JOB_NAME="${{ github.job }}"
-      if echo "$JOB_NAME" | grep -q "^high-cpu"; then EXPECTED_CPUS="4.0"; EXPECTED_MEM="8.0 GB"; else EXPECTED_CPUS="1.0"; EXPECTED_MEM="2.0 GB"; fi
-      if [ "$CPUS" = "$EXPECTED_CPUS" ]; then CPU_STATUS="correct"; else CPU_STATUS="WRONG (expected $EXPECTED_CPUS)"; fi
-      if [ "$MEM_DISPLAY" = "$EXPECTED_MEM" ]; then MEM_STATUS="correct"; else MEM_STATUS="WRONG (expected $EXPECTED_MEM)"; fi
-      { echo "### $JOB_NAME"; echo ""; echo "| Metric | Value | Status |"; echo "|--------|-------|--------|"
-        echo "| **Runner** | \`${RUNNER_NAME}\` | |"; echo "| **CPU Limit** | ${CPUS} CPUs | ${CPU_STATUS} |"
-        echo "| **Memory Limit** | ${MEM_DISPLAY} | ${MEM_STATUS} |"; echo ""; } >> "$GITHUB_STEP_SUMMARY"
-      echo "Job: $JOB_NAME | Runner: $RUNNER_NAME | CPUs: $CPUS | Memory: $MEM_DISPLAY"
- low-cpu-8:
-  runs-on: ["gh-proxy-runner"]
-  steps:
-   - name: Report resources
-     run: |
-      if [ -f /sys/fs/cgroup/cpu.max ]; then
-        read QUOTA PERIOD < /sys/fs/cgroup/cpu.max
-        if [ "$QUOTA" != "max" ]; then CPUS=$(awk "BEGIN {printf \"%.1f\", $QUOTA / $PERIOD}"); else CPUS=$(nproc); fi
-      elif [ -f /sys/fs/cgroup/cpu/cpu.cfs_quota_us ]; then
-        QUOTA=$(cat /sys/fs/cgroup/cpu/cpu.cfs_quota_us); PERIOD=$(cat /sys/fs/cgroup/cpu/cpu.cfs_period_us)
-        if [ "$QUOTA" != "-1" ]; then CPUS=$(awk "BEGIN {printf \"%.1f\", $QUOTA / $PERIOD}"); else CPUS=$(nproc); fi
-      else CPUS=$(nproc); fi
-      if [ -f /sys/fs/cgroup/memory.max ]; then
-        MEM_BYTES=$(cat /sys/fs/cgroup/memory.max)
-        if [ "$MEM_BYTES" = "max" ]; then MEM_DISPLAY="unlimited"; else MEM_DISPLAY="$(awk "BEGIN {printf \"%.1f GB\", $MEM_BYTES / 1073741824}")"; fi
-      elif [ -f /sys/fs/cgroup/memory/memory.limit_in_bytes ]; then
-        MEM_BYTES=$(cat /sys/fs/cgroup/memory/memory.limit_in_bytes); MEM_DISPLAY="$(awk "BEGIN {printf \"%.1f GB\", $MEM_BYTES / 1073741824}")"
-      else MEM_DISPLAY="unknown"; fi
-      RUNNER_NAME=$(hostname); JOB_NAME="${{ github.job }}"
-      if echo "$JOB_NAME" | grep -q "^high-cpu"; then EXPECTED_CPUS="4.0"; EXPECTED_MEM="8.0 GB"; else EXPECTED_CPUS="1.0"; EXPECTED_MEM="2.0 GB"; fi
-      if [ "$CPUS" = "$EXPECTED_CPUS" ]; then CPU_STATUS="correct"; else CPU_STATUS="WRONG (expected $EXPECTED_CPUS)"; fi
-      if [ "$MEM_DISPLAY" = "$EXPECTED_MEM" ]; then MEM_STATUS="correct"; else MEM_STATUS="WRONG (expected $EXPECTED_MEM)"; fi
-      { echo "### $JOB_NAME"; echo ""; echo "| Metric | Value | Status |"; echo "|--------|-------|--------|"
-        echo "| **Runner** | \`${RUNNER_NAME}\` | |"; echo "| **CPU Limit** | ${CPUS} CPUs | ${CPU_STATUS} |"
-        echo "| **Memory Limit** | ${MEM_DISPLAY} | ${MEM_STATUS} |"; echo ""; } >> "$GITHUB_STEP_SUMMARY"
-      echo "Job: $JOB_NAME | Runner: $RUNNER_NAME | CPUs: $CPUS | Memory: $MEM_DISPLAY"
- low-cpu-9:
-  runs-on: ["gh-proxy-runner"]
-  steps:
-   - name: Report resources
-     run: |
-      if [ -f /sys/fs/cgroup/cpu.max ]; then
-        read QUOTA PERIOD < /sys/fs/cgroup/cpu.max
-        if [ "$QUOTA" != "max" ]; then CPUS=$(awk "BEGIN {printf \"%.1f\", $QUOTA / $PERIOD}"); else CPUS=$(nproc); fi
-      elif [ -f /sys/fs/cgroup/cpu/cpu.cfs_quota_us ]; then
-        QUOTA=$(cat /sys/fs/cgroup/cpu/cpu.cfs_quota_us); PERIOD=$(cat /sys/fs/cgroup/cpu/cpu.cfs_period_us)
-        if [ "$QUOTA" != "-1" ]; then CPUS=$(awk "BEGIN {printf \"%.1f\", $QUOTA / $PERIOD}"); else CPUS=$(nproc); fi
-      else CPUS=$(nproc); fi
-      if [ -f /sys/fs/cgroup/memory.max ]; then
-        MEM_BYTES=$(cat /sys/fs/cgroup/memory.max)
-        if [ "$MEM_BYTES" = "max" ]; then MEM_DISPLAY="unlimited"; else MEM_DISPLAY="$(awk "BEGIN {printf \"%.1f GB\", $MEM_BYTES / 1073741824}")"; fi
-      elif [ -f /sys/fs/cgroup/memory/memory.limit_in_bytes ]; then
-        MEM_BYTES=$(cat /sys/fs/cgroup/memory/memory.limit_in_bytes); MEM_DISPLAY="$(awk "BEGIN {printf \"%.1f GB\", $MEM_BYTES / 1073741824}")"
-      else MEM_DISPLAY="unknown"; fi
-      RUNNER_NAME=$(hostname); JOB_NAME="${{ github.job }}"
-      if echo "$JOB_NAME" | grep -q "^high-cpu"; then EXPECTED_CPUS="4.0"; EXPECTED_MEM="8.0 GB"; else EXPECTED_CPUS="1.0"; EXPECTED_MEM="2.0 GB"; fi
-      if [ "$CPUS" = "$EXPECTED_CPUS" ]; then CPU_STATUS="correct"; else CPU_STATUS="WRONG (expected $EXPECTED_CPUS)"; fi
-      if [ "$MEM_DISPLAY" = "$EXPECTED_MEM" ]; then MEM_STATUS="correct"; else MEM_STATUS="WRONG (expected $EXPECTED_MEM)"; fi
-      { echo "### $JOB_NAME"; echo ""; echo "| Metric | Value | Status |"; echo "|--------|-------|--------|"
-        echo "| **Runner** | \`${RUNNER_NAME}\` | |"; echo "| **CPU Limit** | ${CPUS} CPUs | ${CPU_STATUS} |"
-        echo "| **Memory Limit** | ${MEM_DISPLAY} | ${MEM_STATUS} |"; echo ""; } >> "$GITHUB_STEP_SUMMARY"
-      echo "Job: $JOB_NAME | Runner: $RUNNER_NAME | CPUs: $CPUS | Memory: $MEM_DISPLAY"
+  run:
+    runs-on: ["gh-proxy-runner"]
+    strategy:
+      matrix:
+        job-name:
+          - low-cpu-1
+          - low-cpu-2
+          - low-cpu-3
+          - high-cpu
+          - low-cpu-4
+          - low-cpu-5
+          - low-cpu-6
+          - low-cpu-7
+          - low-cpu-8
+          - low-cpu-9
+    name: ${{ matrix.job-name }}
+    steps:
+      - name: Report resources
+        run: |
+          # Detect CPU limit from cgroups
+          if [ -f /sys/fs/cgroup/cpu.max ]; then
+            read QUOTA PERIOD < /sys/fs/cgroup/cpu.max
+            if [ "$QUOTA" != "max" ]; then
+              CPUS=$(awk "BEGIN {printf \"%.1f\", $QUOTA / $PERIOD}")
+            else
+              CPUS=$(nproc)
+            fi
+          elif [ -f /sys/fs/cgroup/cpu/cpu.cfs_quota_us ]; then
+            QUOTA=$(cat /sys/fs/cgroup/cpu/cpu.cfs_quota_us)
+            PERIOD=$(cat /sys/fs/cgroup/cpu/cpu.cfs_period_us)
+            if [ "$QUOTA" != "-1" ]; then
+              CPUS=$(awk "BEGIN {printf \"%.1f\", $QUOTA / $PERIOD}")
+            else
+              CPUS=$(nproc)
+            fi
+          else
+            CPUS=$(nproc)
+          fi
+
+          # Detect memory limit from cgroups
+          if [ -f /sys/fs/cgroup/memory.max ]; then
+            MEM_BYTES=$(cat /sys/fs/cgroup/memory.max)
+            if [ "$MEM_BYTES" = "max" ]; then
+              MEM_DISPLAY="unlimited"
+            else
+              MEM_DISPLAY="$(awk "BEGIN {printf \"%.1f GB\", $MEM_BYTES / 1073741824}")"
+            fi
+          elif [ -f /sys/fs/cgroup/memory/memory.limit_in_bytes ]; then
+            MEM_BYTES=$(cat /sys/fs/cgroup/memory/memory.limit_in_bytes)
+            MEM_DISPLAY="$(awk "BEGIN {printf \"%.1f GB\", $MEM_BYTES / 1073741824}")"
+          else
+            MEM_DISPLAY="unknown"
+          fi
+
+          RUNNER_NAME=$(hostname)
+          JOB_NAME="${{ matrix.job-name }}"
+
+          # Determine expected resources based on job name
+          if echo "$JOB_NAME" | grep -q "^high-cpu"; then
+            EXPECTED_CPUS="4.0"
+            EXPECTED_MEM="8.0 GB"
+          else
+            EXPECTED_CPUS="1.0"
+            EXPECTED_MEM="2.0 GB"
+          fi
+
+          # Validate
+          if [ "$CPUS" = "$EXPECTED_CPUS" ]; then
+            CPU_STATUS="correct"
+          else
+            CPU_STATUS="WRONG (expected $EXPECTED_CPUS)"
+          fi
+          if [ "$MEM_DISPLAY" = "$EXPECTED_MEM" ]; then
+            MEM_STATUS="correct"
+          else
+            MEM_STATUS="WRONG (expected $EXPECTED_MEM)"
+          fi
+
+          # Write to GitHub job summary
+          {
+            echo "### $JOB_NAME"
+            echo ""
+            echo "| Metric | Value | Status |"
+            echo "|--------|-------|--------|"
+            echo "| **Runner** | \`${RUNNER_NAME}\` | |"
+            echo "| **CPU Limit** | ${CPUS} CPUs | ${CPU_STATUS} |"
+            echo "| **Memory Limit** | ${MEM_DISPLAY} | ${MEM_STATUS} |"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          echo "Job: $JOB_NAME | Runner: $RUNNER_NAME | CPUs: $CPUS | Memory: $MEM_DISPLAY"
