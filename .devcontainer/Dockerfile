@@ -23,6 +23,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   vim \
   wget \
   ca-certificates \
+  python3-pip \
+  && pip install --break-system-packages pre-commit \
   && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Install Go
