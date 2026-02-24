@@ -60,8 +60,7 @@ internal/
   state/                   Thread-safe runner state store
 config.yaml                Job-to-profile mapping configuration
 .github/workflows/
-  test-case.yaml           8-job test workflow (1 high-cpu, 7 low-cpu)
-  test-case-10.yaml        10-job test workflow (1 high-cpu at #4, 9 low-cpu)
+  test-case-10.yaml        10-job matrix workflow (1 high-cpu at #4, 9 low-cpu)
 ```
 
 ## Configuration
@@ -131,23 +130,16 @@ The system will:
 
 ## Testing
 
-Two test workflows are included. Both use `workflow_dispatch` (manual trigger).
-
-### test-case (8 jobs)
-
-1 `high-cpu` + 7 `low-cpu-*` jobs, all with the `["gh-proxy-runner"]` label.
-
-```bash
-# With the system running:
-gh workflow run test-case
-gh run watch  # watch it complete
-```
+A test workflow is included using `workflow_dispatch` (manual trigger).
 
 ### test-case-10 (10 jobs)
 
-1 `high-cpu` (at position #4) + 9 `low-cpu-*` jobs.
+1 `high-cpu` (at position #4) + 9 `low-cpu-*` jobs, all with the `["gh-proxy-runner"]` label. Uses a matrix strategy so each job's `name` field becomes its `JobDisplayName` for classification.
+
+Each job self-validates by reading cgroup CPU/memory limits and comparing them against expected values based on its name. Results are written to the GitHub Actions job summary for at-a-glance verification.
 
 ```bash
+# With the system running:
 gh workflow run test-case-10
 gh run watch
 ```
@@ -180,6 +172,115 @@ CONNECT tunnel runner_name=runner-high-cpu-xxx profile=high-cpu target=github.co
 ```bash
 go test ./internal/...
 ```
+
+## How the Proxy Works
+
+The proxy is the core mechanism that makes resource-aware routing possible. It's the link between "we provisioned a container with 4 CPUs" and "we can prove that the high-cpu job actually ran on that container."
+
+### The Problem the Proxy Solves
+
+GitHub's runner protocol is simple: a runner registers, GitHub sends it a job, the runner executes it. All communication is HTTPS from the runner to GitHub — there's no inbound connection for us to intercept. We can't insert ourselves into the GitHub→runner assignment path. But we *can* insert ourselves into the runner→GitHub traffic path by controlling the network.
+
+### Network Architecture
+
+At startup, the system creates a dedicated Docker bridge network (`gh-proxy-runners`). Every runner container is attached to this network. The proxy server binds to port 8080 on the host.
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  Docker bridge network: gh-proxy-runners                    │
+│                                                             │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐      │
+│  │ runner-high-  │  │ runner-low-  │  │ runner-low-  │ ...  │
+│  │ cpu-job-1     │  │ cpu-job-2    │  │ cpu-job-3    │      │
+│  │ 172.18.0.2    │  │ 172.18.0.3   │  │ 172.18.0.4   │      │
+│  │ CPUs: 4       │  │ CPUs: 1      │  │ CPUs: 1      │      │
+│  │ Mem: 8GB      │  │ Mem: 2GB     │  │ Mem: 2GB     │      │
+│  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘      │
+│         │                 │                 │               │
+│         ▼                 ▼                 ▼               │
+│  ┌──────────────────────────────────────────────────┐       │
+│  │          Gateway IP: 172.18.0.1                  │       │
+│  │          HTTP CONNECT Proxy (:8080)              │       │
+│  └──────────────────────┬───────────────────────────┘       │
+└─────────────────────────┼───────────────────────────────────┘
+                          │
+                          ▼
+                   github.com:443
+                   (pipelines.actions.githubusercontent.com, etc.)
+```
+
+The key trick: when each runner container is created, it's injected with proxy environment variables pointing to the bridge network's gateway IP:
+
+```
+https_proxy=http://172.18.0.1:8080
+http_proxy=http://172.18.0.1:8080
+HTTPS_PROXY=http://172.18.0.1:8080
+HTTP_PROXY=http://172.18.0.1:8080
+```
+
+This forces **all** HTTP/HTTPS traffic from every runner through our proxy. The runner doesn't know it's being proxied — it just follows standard proxy environment variables that virtually all HTTP clients respect.
+
+### Runner Identification via Source IP
+
+When a runner makes an HTTPS request (e.g., to `github.com:443`), it arrives at the proxy as an HTTP CONNECT request. The proxy extracts the source IP from the TCP connection:
+
+```
+source IP: 172.18.0.2 → lookup in state store → runner-high-cpu-job-1, profile=high-cpu
+```
+
+The **state store** (`internal/state/state.go`) is the shared data structure that connects the scaler and proxy. When the scaler provisions a runner container, it records the container's bridge network IP in the store alongside the runner name, profile, job ID, and job display name. When the proxy receives a connection, it calls `store.GetByContainerIP(sourceIP)` to look up exactly which runner — and which resource profile — is making the request.
+
+This is what a proxy log line looks like:
+
+```
+CONNECT tunnel runner_name=runner-high-cpu-job-1 profile=high-cpu job_name=high-cpu target=github.com:443 source_ip=172.18.0.2
+```
+
+Every HTTPS connection from every runner is logged with full attribution: which runner, which profile, which job, and where it's connecting. This creates a complete audit trail of runner-to-job assignments.
+
+### HTTP CONNECT Tunnel Mechanism
+
+The proxy implements the [HTTP CONNECT method](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Methods/CONNECT) — the standard way HTTP proxies handle HTTPS traffic:
+
+1. The runner sends `CONNECT github.com:443 HTTP/1.1`
+2. The proxy opens a TCP connection to `github.com:443`
+3. The proxy responds `HTTP/1.1 200 Connection Established`
+4. The proxy hijacks the HTTP connection to get the raw TCP socket
+5. Two goroutines shuttle bytes bidirectionally: runner ↔ proxy ↔ GitHub
+
+The proxy never decrypts TLS — it's a transparent tunnel. It can't see the content of requests, but it doesn't need to. The source IP identification tells it everything: which runner is talking, what profile it has, and which job it's running.
+
+### Shared State: The Glue Between Scaler and Proxy
+
+The scaler and proxy run in the same process and share a single thread-safe `state.Store`. The data flow:
+
+```
+Scaler                          State Store                       Proxy
+  │                                 │                               │
+  │  1. Provision runner            │                               │
+  │     container_ip=172.18.0.2     │                               │
+  │  ──── AddRunner(info) ────────► │                               │
+  │                                 │  2. Runner makes HTTPS req    │
+  │                                 │ ◄── GetByContainerIP(ip) ──── │
+  │                                 │ ─── RunnerInfo ─────────────► │
+  │                                 │                               │
+  │                                 │     3. Proxy logs:            │
+  │                                 │        runner=runner-high-cpu  │
+  │                                 │        profile=high-cpu       │
+  │                                 │        target=github.com:443  │
+  │  4. Job completes               │                               │
+  │  ──── Remove(name) ───────────► │                               │
+```
+
+The store tracks each runner's full lifecycle: idle (provisioned, waiting for job), busy (executing a job), and completed (job finished). This allows the proxy to identify runners at any point during their lifecycle.
+
+### Why This Matters
+
+Without the proxy, we'd have no way to verify that our resource-aware provisioning actually works. We could provision a 4-CPU container for a high-cpu job, but GitHub might silently reassign that job to a different runner. The proxy gives us:
+
+1. **Verification** — Every request is logged with the runner's profile, so we can confirm high-cpu jobs always flow through high-cpu runners
+2. **Observability** — A real-time view of which runners are active, what profiles they have, and what they're connecting to
+3. **Audit trail** — Complete history of all runner-to-GitHub communication with runner/profile attribution
 
 ## Key Design Decisions
 

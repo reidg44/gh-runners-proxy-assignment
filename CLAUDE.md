@@ -28,6 +28,10 @@ Two components run together (combined in `cmd/all/main.go`):
 - **Message acknowledgment before processing** — Matches the official listener pattern. `DeleteMessage` is called before handling events to prevent re-delivery loops.
 - **409 conflict handling** — On stale session (409), the scale set is deleted and recreated to get a fresh session.
 
+## Workflow Expectations
+
+- **Always update documentation** — When making code changes, update relevant documentation (README.md, CLAUDE.md, code comments) as part of the same task. Don't wait to be asked.
+
 ## Build and Run Commands
 
 ```bash
@@ -45,8 +49,7 @@ go test ./internal/classifier/...
 export GITHUB_TOKEN=$(grep GH_TOKEN .env | cut -d= -f2)
 ./bin/gh-proxy --config config.yaml
 
-# Trigger test workflows
-gh workflow run test-case        # 8 jobs: 1 high-cpu, 7 low-cpu
+# Trigger test workflow
 gh workflow run test-case-10     # 10 jobs: 1 high-cpu at #4, 9 low-cpu
 ```
 
@@ -58,10 +61,9 @@ The `GITHUB_TOKEN` env var must be set (PAT with `repo` + `admin:org` scopes). T
 
 ## Test Infrastructure
 
-Two manually-triggered workflows (`workflow_dispatch`):
+One manually-triggered workflow (`workflow_dispatch`):
 
-- **`test-case.yaml`** — 8 parallel jobs: 1 `high-cpu` + 7 `low-cpu-*`, all using `["gh-proxy-runner"]` label
-- **`test-case-10.yaml`** — 10 parallel jobs: 1 `high-cpu` (at position #4) + 9 `low-cpu-*`
+- **`test-case-10.yaml`** — 10-job matrix: 1 `high-cpu` (at position #4) + 9 `low-cpu-*`, all using `["gh-proxy-runner"]` label. Each job reads cgroup CPU/memory limits and writes a validation table to GitHub Actions job summary.
 
 Verification: check logs for `runner_name=runner-high-cpu-*` on high-cpu jobs and `runner_name=runner-low-cpu-*` on low-cpu jobs. Zero mismatches = success.
 
