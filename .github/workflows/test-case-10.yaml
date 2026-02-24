@@ -72,26 +72,87 @@ jobs:
 
           # Validate
           if [ "$CPUS" = "$EXPECTED_CPUS" ]; then
-            CPU_STATUS="correct"
+            CPU_STATUS="pass"
           else
-            CPU_STATUS="WRONG (expected $EXPECTED_CPUS)"
+            CPU_STATUS="FAIL (expected $EXPECTED_CPUS)"
           fi
           if [ "$MEM_DISPLAY" = "$EXPECTED_MEM" ]; then
-            MEM_STATUS="correct"
+            MEM_STATUS="pass"
           else
-            MEM_STATUS="WRONG (expected $EXPECTED_MEM)"
+            MEM_STATUS="FAIL (expected $EXPECTED_MEM)"
           fi
 
-          # Write to GitHub job summary
-          {
-            echo "### $JOB_NAME"
-            echo ""
-            echo "| Metric | Value | Status |"
-            echo "|--------|-------|--------|"
-            echo "| **Runner** | \`${RUNNER_NAME}\` | |"
-            echo "| **CPU Limit** | ${CPUS} CPUs | ${CPU_STATUS} |"
-            echo "| **Memory Limit** | ${MEM_DISPLAY} | ${MEM_STATUS} |"
-            echo ""
-          } >> "$GITHUB_STEP_SUMMARY"
+          # Write results file for the summary job
+          echo "${JOB_NAME}|${RUNNER_NAME}|${CPUS}|${EXPECTED_CPUS}|${MEM_DISPLAY}|${EXPECTED_MEM}|${CPU_STATUS}|${MEM_STATUS}" \
+            > "results-${{ matrix.job-name }}.txt"
 
           echo "Job: $JOB_NAME | Runner: $RUNNER_NAME | CPUs: $CPUS | Memory: $MEM_DISPLAY"
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: results-${{ matrix.job-name }}
+          path: results-${{ matrix.job-name }}.txt
+
+  summary:
+    needs: [run]
+    runs-on: ubuntu-latest
+    name: summary
+    steps:
+      - name: Download all results
+        uses: actions/download-artifact@v4
+        with:
+          pattern: results-*
+          merge-multiple: true
+
+      - name: Build consolidated summary
+        run: |
+          PASS_COUNT=0
+          FAIL_COUNT=0
+
+          # Start building the summary table
+          {
+            echo "## Resource Validation Summary"
+            echo ""
+            echo "| Job | Runner | CPUs | Expected CPUs | Memory | Expected Memory | CPU | Mem |"
+            echo "|-----|--------|------|---------------|--------|-----------------|-----|-----|"
+          } > summary.md
+
+          for f in results-*.txt; do
+            IFS='|' read -r JOB RUNNER CPUS EXP_CPUS MEM EXP_MEM CPU_ST MEM_ST < "$f"
+
+            # Format status with emoji
+            if [ "$CPU_ST" = "pass" ]; then
+              CPU_ICON="pass"
+            else
+              CPU_ICON="**$CPU_ST**"
+              FAIL_COUNT=$((FAIL_COUNT + 1))
+            fi
+            if [ "$MEM_ST" = "pass" ]; then
+              MEM_ICON="pass"
+            else
+              MEM_ICON="**$MEM_ST**"
+              FAIL_COUNT=$((FAIL_COUNT + 1))
+            fi
+
+            echo "| ${JOB} | \`${RUNNER}\` | ${CPUS} | ${EXP_CPUS} | ${MEM} | ${EXP_MEM} | ${CPU_ICON} | ${MEM_ICON} |" >> summary.md
+            PASS_COUNT=$((PASS_COUNT + 1))
+          done
+
+          # Add verdict
+          {
+            echo ""
+            if [ "$FAIL_COUNT" -eq 0 ]; then
+              echo "**Result: ALL ${PASS_COUNT} JOBS PASSED**"
+            else
+              echo "**Result: ${FAIL_COUNT} CHECK(S) FAILED out of ${PASS_COUNT} jobs**"
+            fi
+          } >> summary.md
+
+          cat summary.md >> "$GITHUB_STEP_SUMMARY"
+          cat summary.md
+
+          # Fail the job if any checks failed
+          if [ "$FAIL_COUNT" -ne 0 ]; then
+            exit 1
+          fi

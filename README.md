@@ -136,7 +136,7 @@ A test workflow is included using `workflow_dispatch` (manual trigger).
 
 1 `high-cpu` (at position #4) + 9 `low-cpu-*` jobs, all with the `["gh-proxy-runner"]` label. Uses a matrix strategy so each job's `name` field becomes its `JobDisplayName` for classification.
 
-Each job self-validates by reading cgroup CPU/memory limits and comparing them against expected values based on its name. Results are written to the GitHub Actions job summary for at-a-glance verification.
+Each job self-validates by reading cgroup CPU/memory limits and comparing them against expected values based on its name. Results are uploaded as artifacts. A downstream `summary` job collects all results and publishes a single consolidated markdown table to the GitHub Actions job summary with a pass/fail verdict — making it easy to verify all 10 jobs at a glance.
 
 ```bash
 # With the system running:
