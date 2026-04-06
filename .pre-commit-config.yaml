@@ -1,26 +1,26 @@
-# pre-commit file
+# prek config file
 # .pre-commit-config.yaml
-# https://pre-commit.com/
+# https://prek.j178.dev/
 
 # To install, run:
-# pre-commit autoupdate && pre-commit install
+# prek autoupdate && prek install
 
 ## To run for all files:
-# pre-commit run --all-files
+# prek run --all-files
 
 repos:
-    - repo: https://github.com/gitleaks/gitleaks
-      rev: v8.30.0
-      hooks:
-          - id: gitleaks
+- repo: https://github.com/betterleaks/betterleaks
+  rev: v1.1.1
+  hooks:
+  - id: betterleaks
 
-    - repo: https://github.com/pre-commit/pre-commit-hooks
-      rev: v6.0.0
-      hooks:
-          - id: check-added-large-files
-            args: ["--maxkb=500"]
-          - id: check-yaml
-          - id: check-toml
-          - id: end-of-file-fixer
-          - id: mixed-line-ending
-          - id: trailing-whitespace
+- repo: https://github.com/pre-commit/pre-commit-hooks
+  rev: v6.0.0
+  hooks:
+  - id: check-added-large-files
+    args: [ "--maxkb=500" ]
+  - id: check-yaml
+  - id: check-toml
+  - id: end-of-file-fixer
+  - id: mixed-line-ending
+  - id: trailing-whitespace

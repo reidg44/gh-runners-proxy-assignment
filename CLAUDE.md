@@ -8,7 +8,7 @@ This project implements intelligent GitHub Actions runner assignment via a proxy
 
 ### Architecture
 
-Two components run together (combined in `cmd/all/main.go`):
+Two components run together (combined in `cmd/all/main.go`). Each component can also run standalone via `cmd/listener/main.go` and `cmd/proxy/main.go`.
 
 1. **Listener/Scaler** (`internal/scaler/`) — Uses the [actions/scaleset Go SDK](https://github.com/actions/scaleset) `MessageSessionClient` directly (not `listener.Run()`) to receive per-job details. Classifies jobs by display name using glob patterns, generates JIT runner configs, and provisions Docker containers with matching CPU/memory limits.
 2. **HTTP CONNECT Proxy** (`internal/proxy/`) — Intercepts all runner-to-GitHub HTTPS traffic. Identifies runners by container IP via the shared state store and logs runner name, profile, job name, and target host for every tunnel.
@@ -51,6 +51,10 @@ export GITHUB_TOKEN=$(grep GH_TOKEN .env | cut -d= -f2)
 
 # Trigger test workflow
 gh workflow run test-case-10     # 10 jobs: 1 high-cpu at #4, 9 low-cpu
+
+# Lint and format
+go vet ./internal/...
+prek run --all-files
 ```
 
 ## Configuration
@@ -69,6 +73,6 @@ Verification: check the `summary` job's GitHub Actions summary for the consolida
 
 ## Environment
 
-- **Devcontainer** — Dockerfile installs Go + Docker CLI. `devcontainer.json` enables docker-in-docker feature and privileged mode. Passwordless sudo for the `node` user.
 - **Go version** — `go 1.25.3` in `go.mod` (uses `GOTOOLCHAIN=auto` to auto-download)
 - **Key dependencies** — `github.com/actions/scaleset v0.1.0`, `github.com/docker/docker v28.5.2`, `github.com/spf13/cobra`, `gopkg.in/yaml.v3`
+- **Prek** — Configured via `.pre-commit-config.yaml` with betterleaks (secret scanning) and standard hooks (trailing whitespace, YAML validation, large file check). Install: `prek autoupdate && prek install`. Run manually: `prek run --all-files`.
