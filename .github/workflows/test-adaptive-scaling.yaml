@@ -1,0 +1,261 @@
+name: test-adaptive-scaling
+permissions:
+  contents: read
+on:
+  workflow_dispatch:
+
+# Two-phase test for adaptive resource scaling.
+# Prerequisite: system running with adaptive.enabled=true, adaptive.history_window=1
+#
+# Phase 1 (stress): Jobs run under low-cpu profile (1 CPU, 2g) and consume
+#   resources above the 80% scale_up_threshold.
+# Phase 2 (verify): Same job names run again. The adaptive system should
+#   provision higher limits based on phase 1 metrics.
+
+jobs:
+  # ── Phase 1: Stress resources to trigger adaptive scale-up ──
+  stress:
+    runs-on: ["gh-proxy-runner"]
+    strategy:
+      matrix:
+        job-name:
+          - low-cpu-stress-cpu
+          - low-cpu-stress-mem
+    name: ${{ matrix.job-name }}
+    steps:
+      - name: Record baseline limits
+        id: baseline
+        run: |
+          # Detect CPU limit
+          if [ -f /sys/fs/cgroup/cpu.max ]; then
+            read QUOTA PERIOD < /sys/fs/cgroup/cpu.max
+            if [ "$QUOTA" != "max" ]; then
+              CPUS=$(awk "BEGIN {printf \"%.1f\", $QUOTA / $PERIOD}")
+            else
+              CPUS=$(nproc).0
+            fi
+          elif [ -f /sys/fs/cgroup/cpu/cpu.cfs_quota_us ]; then
+            QUOTA=$(cat /sys/fs/cgroup/cpu/cpu.cfs_quota_us)
+            PERIOD=$(cat /sys/fs/cgroup/cpu/cpu.cfs_period_us)
+            if [ "$QUOTA" != "-1" ]; then
+              CPUS=$(awk "BEGIN {printf \"%.1f\", $QUOTA / $PERIOD}")
+            else
+              CPUS=$(nproc).0
+            fi
+          else
+            CPUS=$(nproc).0
+          fi
+
+          # Detect memory limit
+          if [ -f /sys/fs/cgroup/memory.max ]; then
+            MEM_BYTES=$(cat /sys/fs/cgroup/memory.max)
+            if [ "$MEM_BYTES" = "max" ]; then
+              MEM_GB="unlimited"
+            else
+              MEM_GB=$(awk "BEGIN {printf \"%.1f\", $MEM_BYTES / 1073741824}")
+            fi
+          elif [ -f /sys/fs/cgroup/memory/memory.limit_in_bytes ]; then
+            MEM_BYTES=$(cat /sys/fs/cgroup/memory/memory.limit_in_bytes)
+            MEM_GB=$(awk "BEGIN {printf \"%.1f\", $MEM_BYTES / 1073741824}")
+          else
+            MEM_GB="unknown"
+          fi
+
+          echo "cpus=$CPUS" >> "$GITHUB_OUTPUT"
+          echo "mem_gb=$MEM_GB" >> "$GITHUB_OUTPUT"
+          echo "Phase 1 baseline: CPUs=$CPUS Memory=${MEM_GB}GB"
+
+      - name: Stress CPU
+        if: matrix.job-name == 'low-cpu-stress-cpu'
+        run: |
+          echo "Consuming >80% CPU for 30 seconds..."
+          timeout 30 bash -c 'while true; do :; done' || true
+
+      - name: Stress memory
+        if: matrix.job-name == 'low-cpu-stress-mem'
+        run: |
+          echo "Allocating ~1.5GB to push peak memory above 80% of 2g..."
+          head -c 1536M /dev/urandom > /dev/shm/memtest
+          sleep 10
+          rm -f /dev/shm/memtest
+
+      - name: Write phase 1 results
+        run: |
+          RUNNER_NAME=$(hostname)
+          echo "${{ matrix.job-name }}|phase1|${{ steps.baseline.outputs.cpus }}|${{ steps.baseline.outputs.mem_gb }}|${RUNNER_NAME}" \
+            > "phase1-${{ matrix.job-name }}.txt"
+
+      - name: Upload phase 1 results
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase1-${{ matrix.job-name }}
+          path: phase1-${{ matrix.job-name }}.txt
+
+  # ── Phase 2: Verify adaptive system provisioned higher limits ──
+  verify:
+    needs: [stress]
+    runs-on: ["gh-proxy-runner"]
+    strategy:
+      matrix:
+        job-name:
+          - low-cpu-stress-cpu
+          - low-cpu-stress-mem
+    name: ${{ matrix.job-name }}
+    steps:
+      - name: Check adjusted limits
+        id: adjusted
+        run: |
+          # Detect CPU limit
+          if [ -f /sys/fs/cgroup/cpu.max ]; then
+            read QUOTA PERIOD < /sys/fs/cgroup/cpu.max
+            if [ "$QUOTA" != "max" ]; then
+              CPUS=$(awk "BEGIN {printf \"%.1f\", $QUOTA / $PERIOD}")
+            else
+              CPUS=$(nproc).0
+            fi
+          elif [ -f /sys/fs/cgroup/cpu/cpu.cfs_quota_us ]; then
+            QUOTA=$(cat /sys/fs/cgroup/cpu/cpu.cfs_quota_us)
+            PERIOD=$(cat /sys/fs/cgroup/cpu/cpu.cfs_period_us)
+            if [ "$QUOTA" != "-1" ]; then
+              CPUS=$(awk "BEGIN {printf \"%.1f\", $QUOTA / $PERIOD}")
+            else
+              CPUS=$(nproc).0
+            fi
+          else
+            CPUS=$(nproc).0
+          fi
+
+          # Detect memory limit
+          if [ -f /sys/fs/cgroup/memory.max ]; then
+            MEM_BYTES=$(cat /sys/fs/cgroup/memory.max)
+            if [ "$MEM_BYTES" = "max" ]; then
+              MEM_GB="unlimited"
+            else
+              MEM_GB=$(awk "BEGIN {printf \"%.1f\", $MEM_BYTES / 1073741824}")
+            fi
+          elif [ -f /sys/fs/cgroup/memory/memory.limit_in_bytes ]; then
+            MEM_BYTES=$(cat /sys/fs/cgroup/memory/memory.limit_in_bytes)
+            MEM_GB=$(awk "BEGIN {printf \"%.1f\", $MEM_BYTES / 1073741824}")
+          else
+            MEM_GB="unknown"
+          fi
+
+          echo "cpus=$CPUS" >> "$GITHUB_OUTPUT"
+          echo "mem_gb=$MEM_GB" >> "$GITHUB_OUTPUT"
+          echo "Phase 2 limits: CPUs=$CPUS Memory=${MEM_GB}GB"
+
+      - name: Validate CPU scale-up
+        if: matrix.job-name == 'low-cpu-stress-cpu'
+        run: |
+          CPUS="${{ steps.adjusted.outputs.cpus }}"
+          BASELINE="1.0"
+
+          if awk "BEGIN {exit !($CPUS > $BASELINE)}"; then
+            echo "PASS: CPU scaled up from $BASELINE to $CPUS"
+            echo "cpu_status=pass" >> "$GITHUB_ENV"
+            echo "mem_status=n/a" >> "$GITHUB_ENV"
+          else
+            echo "FAIL: CPU not scaled up (baseline=$BASELINE actual=$CPUS)"
+            echo "cpu_status=FAIL" >> "$GITHUB_ENV"
+            echo "mem_status=n/a" >> "$GITHUB_ENV"
+          fi
+
+      - name: Validate memory scale-up
+        if: matrix.job-name == 'low-cpu-stress-mem'
+        run: |
+          MEM_GB="${{ steps.adjusted.outputs.mem_gb }}"
+          BASELINE="2.0"
+
+          if awk "BEGIN {exit !($MEM_GB > $BASELINE)}"; then
+            echo "PASS: Memory scaled up from ${BASELINE}GB to ${MEM_GB}GB"
+            echo "mem_status=pass" >> "$GITHUB_ENV"
+            echo "cpu_status=n/a" >> "$GITHUB_ENV"
+          else
+            echo "FAIL: Memory not scaled up (baseline=${BASELINE}GB actual=${MEM_GB}GB)"
+            echo "mem_status=FAIL" >> "$GITHUB_ENV"
+            echo "cpu_status=n/a" >> "$GITHUB_ENV"
+          fi
+
+      - name: Write phase 2 results
+        run: |
+          RUNNER_NAME=$(hostname)
+          echo "${{ matrix.job-name }}|phase2|${{ steps.adjusted.outputs.cpus }}|${{ steps.adjusted.outputs.mem_gb }}|${RUNNER_NAME}|${cpu_status}|${mem_status}" \
+            > "phase2-${{ matrix.job-name }}.txt"
+
+      - name: Upload phase 2 results
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase2-${{ matrix.job-name }}
+          path: phase2-${{ matrix.job-name }}.txt
+
+  # ── Summary: Consolidated report ──
+  summary:
+    needs: [stress, verify]
+    runs-on: ubuntu-latest
+    name: adaptive-summary
+    steps:
+      - name: Download all results
+        uses: actions/download-artifact@v4
+        with:
+          pattern: phase*
+          merge-multiple: true
+
+      - name: Build consolidated summary
+        run: |
+          FAIL_COUNT=0
+
+          {
+            echo "## Adaptive Scaling Test Results"
+            echo ""
+            echo "Tests that the system detects high resource usage in phase 1 and provisions"
+            echo "higher limits in phase 2 for the same job names."
+            echo ""
+            echo "### Phase 1: Baseline Limits (stress run)"
+            echo ""
+            echo "| Job | Runner | CPUs | Memory |"
+            echo "|-----|--------|------|--------|"
+          } > summary.md
+
+          for f in phase1-*.txt; do
+            [ -f "$f" ] || continue
+            IFS='|' read -r JOB PHASE CPUS MEM_GB RUNNER < "$f"
+            echo "| ${JOB} | \`${RUNNER}\` | ${CPUS} | ${MEM_GB} GB |" >> summary.md
+          done
+
+          {
+            echo ""
+            echo "### Phase 2: Adjusted Limits (verify run)"
+            echo ""
+            echo "| Job | Runner | CPUs | Memory | CPU Check | Memory Check |"
+            echo "|-----|--------|------|--------|-----------|--------------|"
+          } >> summary.md
+
+          for f in phase2-*.txt; do
+            [ -f "$f" ] || continue
+            IFS='|' read -r JOB PHASE CPUS MEM_GB RUNNER CPU_ST MEM_ST < "$f"
+
+            if [ "$CPU_ST" != "pass" ] && [ "$CPU_ST" != "n/a" ]; then
+              FAIL_COUNT=$((FAIL_COUNT + 1))
+            fi
+            if [ "$MEM_ST" != "pass" ] && [ "$MEM_ST" != "n/a" ]; then
+              FAIL_COUNT=$((FAIL_COUNT + 1))
+            fi
+
+            echo "| ${JOB} | \`${RUNNER}\` | ${CPUS} | ${MEM_GB} GB | ${CPU_ST} | ${MEM_ST} |" >> summary.md
+          done
+
+          {
+            echo ""
+            if [ "$FAIL_COUNT" -eq 0 ]; then
+              echo "**Result: ADAPTIVE SCALING VERIFIED**"
+            else
+              echo "**Result: ${FAIL_COUNT} CHECK(S) FAILED — adaptive scaling did not adjust limits as expected**"
+            fi
+          } >> summary.md
+
+          cat summary.md >> "$GITHUB_STEP_SUMMARY"
+          cat summary.md
+
+          if [ "$FAIL_COUNT" -ne 0 ]; then
+            exit 1
+          fi
