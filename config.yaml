@@ -32,6 +32,6 @@ adaptive:
   scale_up_threshold: 0.80
   scale_down_threshold: 0.30
   scale_factor: 1.5
-  history_window: 5
+  history_window: 1
   max_cpus: "16"
   max_memory: "32g"
