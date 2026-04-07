@@ -9,9 +9,11 @@ import (
 	"strings"
 	"syscall"
 
+	dockerclient "github.com/docker/docker/client"
 	"github.com/actions/scaleset"
 	"github.com/reidg44/gh-runners-proxy-assignment/internal/classifier"
 	"github.com/reidg44/gh-runners-proxy-assignment/internal/config"
+	"github.com/reidg44/gh-runners-proxy-assignment/internal/metrics"
 	"github.com/reidg44/gh-runners-proxy-assignment/internal/runner"
 	scalerpkg "github.com/reidg44/gh-runners-proxy-assignment/internal/scaler"
 	"github.com/reidg44/gh-runners-proxy-assignment/internal/state"
@@ -131,7 +133,36 @@ func run(configPath string) error {
 
 	proxyURL := fmt.Sprintf("http://%s%s", prov.GatewayIP(), cfg.Proxy.ListenAddr)
 
-	s := scalerpkg.New(sessionClient, client, prov, cls, store, cfg, scaleSet.ID, proxyURL, logger)
+	// Initialize adaptive scaling components (if enabled)
+	var metricsCollector metrics.Collector
+	var metricsStore *metrics.Store
+	var adjuster *metrics.Adjuster
+
+	if cfg.Adaptive.Enabled {
+		logger.Info("adaptive scaling enabled", "db_path", cfg.Adaptive.DBPath)
+		metricsStore, err = metrics.NewStore(cfg.Adaptive.DBPath)
+		if err != nil {
+			return fmt.Errorf("opening metrics store: %w", err)
+		}
+		defer metricsStore.Close()
+
+		dockerCli, err := dockerclient.NewClientWithOpts(dockerclient.FromEnv, dockerclient.WithAPIVersionNegotiation())
+		if err != nil {
+			return fmt.Errorf("creating Docker client for metrics: %w", err)
+		}
+		metricsCollector = metrics.NewDockerCollector(dockerCli)
+
+		adjuster = &metrics.Adjuster{
+			ScaleUpThreshold:   cfg.Adaptive.ScaleUpThreshold,
+			ScaleDownThreshold: cfg.Adaptive.ScaleDownThreshold,
+			ScaleFactor:        cfg.Adaptive.ScaleFactor,
+			HistoryWindow:      cfg.Adaptive.HistoryWindow,
+			MaxCPUs:            cfg.Adaptive.MaxCPUs,
+			MaxMemory:          cfg.Adaptive.MaxMemory,
+		}
+	}
+
+	s := scalerpkg.New(sessionClient, client, prov, cls, store, cfg, scaleSet.ID, proxyURL, metricsCollector, metricsStore, adjuster, logger)
 
 	logger.Info("listener started, waiting for jobs...")
 	return s.Run(ctx)

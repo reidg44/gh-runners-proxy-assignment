@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/actions/scaleset"
 	"github.com/reidg44/gh-runners-proxy-assignment/internal/classifier"
 	"github.com/reidg44/gh-runners-proxy-assignment/internal/config"
+	"github.com/reidg44/gh-runners-proxy-assignment/internal/metrics"
 	"github.com/reidg44/gh-runners-proxy-assignment/internal/state"
 )
 
@@ -47,6 +49,9 @@ type Scaler struct {
 	cfg           *config.Config
 	scaleSetID    int
 	proxyURL      string
+	metricsCollector metrics.Collector
+	metricsStore     *metrics.Store
+	adjuster         *metrics.Adjuster
 	logger        *slog.Logger
 
 	// pendingJobs tracks assigned jobs that haven't been picked up by a runner yet.
@@ -65,19 +70,25 @@ func New(
 	cfg *config.Config,
 	scaleSetID int,
 	proxyURL string,
+	metricsCollector metrics.Collector,
+	metricsStore *metrics.Store,
+	adjuster *metrics.Adjuster,
 	logger *slog.Logger,
 ) *Scaler {
 	return &Scaler{
-		sessionClient: sessionClient,
-		jitGenerator:  jitGenerator,
-		provisioner:   provisioner,
-		classifier:    classifier,
-		store:         store,
-		cfg:           cfg,
-		scaleSetID:    scaleSetID,
-		proxyURL:      proxyURL,
-		logger:        logger,
-		pendingJobs:   make(map[string]*pendingJob),
+		sessionClient:    sessionClient,
+		jitGenerator:     jitGenerator,
+		provisioner:      provisioner,
+		classifier:       classifier,
+		store:            store,
+		cfg:              cfg,
+		scaleSetID:       scaleSetID,
+		proxyURL:         proxyURL,
+		metricsCollector: metricsCollector,
+		metricsStore:     metricsStore,
+		adjuster:         adjuster,
+		logger:           logger,
+		pendingJobs:      make(map[string]*pendingJob),
 	}
 }
 
@@ -212,19 +223,39 @@ func (s *Scaler) provisionRunner(ctx context.Context, jobDisplayName, jobID, pro
 		return fmt.Errorf("generating JIT config: %w", err)
 	}
 
-	// Start the runner container
-	containerID, containerIP, err := s.provisioner.StartRunner(ctx, runnerName, profile, jitCfg.EncodedJITConfig, s.proxyURL)
+	// Determine effective profile — apply adaptive adjustment if available.
+	effectiveProfile := profile
+	if s.adjuster != nil && s.metricsStore != nil {
+		history, err := s.metricsStore.GetHistory(jobDisplayName, s.adjuster.HistoryWindow)
+		if err != nil {
+			s.logger.Warn("failed to get metrics history, using baseline", "job_display_name", jobDisplayName, "error", err)
+		} else {
+			adjusted := s.adjuster.Adjust(profile, history)
+			s.logger.Info("adaptive adjustment",
+				"job_display_name", jobDisplayName,
+				"baseline_cpus", profile.CPUs, "baseline_memory", profile.Memory,
+				"adjusted_cpus", adjusted.CPUs, "adjusted_memory", adjusted.Memory,
+				"reason", adjusted.Reason,
+			)
+			effectiveProfile = &config.Profile{CPUs: adjusted.CPUs, Memory: adjusted.Memory}
+		}
+	}
+
+	// Start the runner container with the effective (possibly adjusted) profile.
+	containerID, containerIP, err := s.provisioner.StartRunner(ctx, runnerName, effectiveProfile, jitCfg.EncodedJITConfig, s.proxyURL)
 	if err != nil {
 		return fmt.Errorf("starting runner container: %w", err)
 	}
 
 	s.store.AddRunner(&state.RunnerInfo{
-		RunnerName:  runnerName,
-		ContainerID: containerID,
-		ContainerIP: containerIP,
-		Profile:     profileName,
-		JobID:       jobID,
-		JobName:     jobDisplayName,
+		RunnerName:      runnerName,
+		ContainerID:     containerID,
+		ContainerIP:     containerIP,
+		Profile:         profileName,
+		JobID:           jobID,
+		JobName:         jobDisplayName,
+		AllocatedCPUs:   effectiveProfile.CPUs,
+		AllocatedMemory: effectiveProfile.Memory,
 	})
 
 	s.logger.Info("runner provisioned",
@@ -284,6 +315,33 @@ func (s *Scaler) handleJobCompleted(ctx context.Context, job *scaleset.JobComple
 	if !ok {
 		s.logger.Warn("completed job for unknown runner", "runner_name", job.RunnerName)
 		return
+	}
+
+	// Collect and record metrics before stopping the container.
+	if s.metricsCollector != nil && s.metricsStore != nil {
+		duration := time.Since(runner.StartedAt)
+		if duration <= 0 {
+			duration = time.Second
+		}
+
+		jobMetrics, err := s.metricsCollector.Collect(ctx, runner.ContainerID, duration)
+		if err != nil {
+			s.logger.Warn("failed to collect metrics", "runner_name", job.RunnerName, "error", err)
+		} else {
+			allocCPU := int64(metrics.ParseCPUToNano(runner.AllocatedCPUs))
+			allocMem := int64(metrics.ParseMemToBytes(runner.AllocatedMemory))
+			if err := s.metricsStore.Record(&metrics.MetricsRecord{
+				JobName:              runner.JobName,
+				Profile:              runner.Profile,
+				CPUAllocatedNanoCPUs: allocCPU,
+				MemAllocatedBytes:    allocMem,
+				CPUUsedNanoCPUs:      jobMetrics.CPUUsedNanoCPUs,
+				MemPeakBytes:         jobMetrics.MemPeakBytes,
+				DurationSec:          duration.Seconds(),
+			}); err != nil {
+				s.logger.Warn("failed to record metrics", "runner_name", job.RunnerName, "error", err)
+			}
+		}
 	}
 
 	if err := s.provisioner.StopRunner(ctx, runner.ContainerID); err != nil {

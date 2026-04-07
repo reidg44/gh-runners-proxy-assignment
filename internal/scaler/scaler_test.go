@@ -125,7 +125,7 @@ func TestHandleJobAssignment(t *testing.T) {
 	cls := classifier.New(cfg.OrderedProfiles, cfg.DefaultProfile)
 	logger := slog.Default()
 
-	s := New(session, jitGen, prov, cls, store, cfg, 42, "http://proxy:8080", logger)
+	s := New(session, jitGen, prov, cls, store, cfg, 42, "http://proxy:8080", nil, nil, nil, logger)
 
 	// Run scaler - it will process one message then get nil (ctx cancelled)
 	go func() {
@@ -203,7 +203,7 @@ func TestHandleJobCompleted(t *testing.T) {
 	cls := classifier.New(cfg.OrderedProfiles, cfg.DefaultProfile)
 	logger := slog.Default()
 
-	s := New(session, &mockJITGenerator{}, prov, cls, store, cfg, 42, "http://proxy:8080", logger)
+	s := New(session, &mockJITGenerator{}, prov, cls, store, cfg, 42, "http://proxy:8080", nil, nil, nil, logger)
 
 	go func() {
 		for session.index < len(session.messages) {
@@ -261,7 +261,7 @@ func TestReconcileRunnerCount(t *testing.T) {
 	cls := classifier.New(cfg.OrderedProfiles, cfg.DefaultProfile)
 	logger := slog.Default()
 
-	s := New(session, jitGen, prov, cls, store, cfg, 42, "http://proxy:8080", logger)
+	s := New(session, jitGen, prov, cls, store, cfg, 42, "http://proxy:8080", nil, nil, nil, logger)
 
 	go func() {
 		for session.index < len(session.messages) {

@@ -20,9 +20,11 @@ type RunnerInfo struct {
 	ContainerID string
 	ContainerIP string
 	Profile     string
-	JobID       string
-	JobName     string
-	Status      RunnerStatus
+	JobID           string
+	JobName         string
+	AllocatedCPUs   string
+	AllocatedMemory string
+	Status          RunnerStatus
 	CreatedAt   time.Time
 	StartedAt   time.Time
 	CompletedAt time.Time
