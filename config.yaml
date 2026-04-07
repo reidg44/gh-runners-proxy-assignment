@@ -14,6 +14,8 @@ profiles:
     cpus: "4"
     memory: "8g"
     match_patterns: ["high-cpu*"]
+    max_cpus: "8"
+    max_memory: "16g"
   low-cpu:
     cpus: "1"
     memory: "2g"
@@ -23,3 +25,13 @@ default_profile: "low-cpu"
 
 proxy:
   listen_addr: ":8080"
+
+adaptive:
+  enabled: true
+  db_path: "metrics.db"
+  scale_up_threshold: 0.80
+  scale_down_threshold: 0.30
+  scale_factor: 1.5
+  history_window: 5
+  max_cpus: "16"
+  max_memory: "32g"
