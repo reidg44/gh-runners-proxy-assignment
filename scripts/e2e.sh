@@ -8,21 +8,25 @@
 # job that exits nonzero when any assertion fails (see README "End-to-end
 # testing" for the conventions).
 #
-# Usage: scripts/e2e.sh <workflow-name> [--fresh-metrics]
-#   --fresh-metrics  move metrics.db aside before starting, so adaptive
-#                    adjustments start from a clean history (implied for
-#                    test-adaptive-scaling)
+# Usage: scripts/e2e.sh <workflow-name> [--keep-metrics]
+#   --keep-metrics  keep the existing metrics.db. By default it is moved
+#                   aside (saved in the run dir) so adaptive scaling starts
+#                   from a clean history — leftover history makes the
+#                   adjuster override the static profile limits that
+#                   test workflows assert against. Not allowed for
+#                   test-adaptive-scaling, whose baselines require a
+#                   fresh history.
 #
 # Environment: E2E_TIMEOUT (seconds, default 1800) caps the wait for the
 # workflow run.
 set -euo pipefail
 
-WORKFLOW="${1:?usage: e2e.sh <workflow-name> [--fresh-metrics]}"
+WORKFLOW="${1:?usage: e2e.sh <workflow-name> [--keep-metrics]}"
 shift
-FRESH_METRICS=false
+FRESH_METRICS=true
 for arg in "$@"; do
   case "$arg" in
-    --fresh-metrics) FRESH_METRICS=true ;;
+    --keep-metrics) FRESH_METRICS=false ;;
     *) echo "unknown flag: $arg" >&2; exit 2 ;;
   esac
 done
@@ -67,7 +71,7 @@ if [ "$WORKFLOW" = "test-adaptive-scaling" ]; then
     || fail "test-adaptive-scaling requires adaptive.enabled: true in config.yaml"
   grep -Eq '^\s*history_window:\s*1\b' "$ROOT/config.yaml" \
     || fail "test-adaptive-scaling requires adaptive.history_window: 1 in config.yaml"
-  FRESH_METRICS=true # phase-1 baselines are hardcoded; stale history breaks them
+  $FRESH_METRICS || fail "test-adaptive-scaling cannot run with --keep-metrics: its phase-1 baselines require a fresh history"
 fi
 
 # Remove stale runner containers from a previous (crashed) run

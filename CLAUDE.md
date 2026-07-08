@@ -72,6 +72,8 @@ The `GITHUB_TOKEN` env var must be set for `cmd/all` and `cmd/listener` (PAT wit
 
 **Run e2e tests with `just e2e <workflow>`** — `scripts/e2e.sh` handles preflight checks (Docker, gh auth, config), builds and starts the system, dispatches the workflow, waits for the conclusion, prints per-job results plus runner assignments, and tears down. Exit 0 = pass. Logs/artifacts land in `.e2e/<timestamp>-<workflow>/`. Note `gh workflow run` uses the workflow file from the **remote** ref — workflow edits need commit+push before they take effect (the harness warns about this).
 
+**Test isolation:** every e2e run starts with a fresh `metrics.db` (previous one saved into the run dir); `--keep-metrics` opts out. Leftover adaptive history otherwise makes the adjuster override static profile limits and fail tests that assert baseline values (observed live: low-cpu jobs provisioned at 1.5 CPUs against a 1.0 expectation).
+
 Two manually-triggered workflows (`workflow_dispatch`):
 
 - **`test-case-10.yaml`** — 10-job matrix: 1 `high-cpu` (at position #4) + 9 `low-cpu-*`, all using `["gh-proxy-runner"]` label. Each job reads cgroup CPU/memory limits (via the shared `./.github/actions/read-limits` composite action), validates against expected values, and uploads results as an artifact. A downstream `summary` job collects all artifacts and publishes a single consolidated markdown table to the GitHub Actions job summary with a pass/fail verdict.

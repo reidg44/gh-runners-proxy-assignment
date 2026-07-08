@@ -20,6 +20,7 @@ jobs:
   stress:
     runs-on: ["gh-proxy-runner"]
     strategy:
+      fail-fast: false # keep both stress results even if one fails
       matrix:
         job-name:
           - low-cpu-stress-cpu
@@ -40,11 +41,14 @@ jobs:
 
       - name: Stress memory
         if: matrix.job-name == 'low-cpu-stress-mem'
+        # Anonymous allocation via the runner's bundled node — /dev/shm is
+        # only 64MB in Docker containers, so a tmpfs write can't do this.
+        # 1740MB peaks at ~86% of the 2g limit (verified in the runner image),
+        # above the 80% scale_up_threshold with headroom against OOM.
         run: |
-          echo "Allocating ~1.5GB to push peak memory above 80% of 2g..."
-          head -c 1536M /dev/urandom > /dev/shm/memtest
-          sleep 10
-          rm -f /dev/shm/memtest
+          echo "Allocating ~1.7GB to push peak memory above 80% of 2g..."
+          NODE=$(command -v node || find /home/runner/externals -type f -name node 2>/dev/null | head -1)
+          "$NODE" -e 'const b = Buffer.alloc(1740*1024*1024, 1); console.log("allocated", b.length, "bytes"); setTimeout(() => process.exit(0), 10000)'
 
       - name: Write phase 1 results
         run: |
@@ -75,6 +79,7 @@ jobs:
     needs: [settle]
     runs-on: ["gh-proxy-runner"]
     strategy:
+      fail-fast: false # report both verify results even if one fails
       matrix:
         job-name:
           - low-cpu-stress-cpu

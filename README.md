@@ -139,12 +139,19 @@ The verdict is the workflow run's conclusion — exit 0 means the test passed.
 
 ```bash
 just e2e                          # runs test-case-10
-just e2e test-adaptive-scaling    # resets metrics.db automatically
+just e2e test-adaptive-scaling
 just e2e-all                      # every e2e workflow in sequence
 ```
 
 Each run's listener log, run metadata, and downloaded artifacts are saved
 under `.e2e/<timestamp>-<workflow>/` for post-mortems.
+
+**Test isolation:** each run starts with a fresh `metrics.db` (the old one
+is saved into the run dir). This matters: with `adaptive.enabled`, history
+from a previous run makes the adjuster override the static profile limits
+that test workflows assert against — e.g. low-cpu jobs get 1.5 CPUs and
+`test-case-10` fails its `1.0` expectation. Pass `--keep-metrics` only when
+you deliberately want history to accumulate across runs.
 
 **Conventions for adding a new e2e workflow** (what the harness relies on):
 

@@ -22,7 +22,7 @@ lint:
 run: build
     GITHUB_TOKEN=$(grep '^GH_TOKEN' .env | cut -d= -f2) ./bin/gh-proxy --config config.yaml
 
-# Run one e2e test: build + start system + dispatch workflow + report verdict (--fresh-metrics resets metrics.db)
+# Run one e2e test: build + start system + dispatch workflow + report verdict (--keep-metrics to keep adaptive history)
 e2e workflow="test-case-10" *flags="":
     scripts/e2e.sh {{workflow}} {{flags}}
 
