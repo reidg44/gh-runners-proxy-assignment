@@ -340,6 +340,13 @@ func (s *Scaler) handleJobCompleted(ctx context.Context, job *scaleset.JobComple
 				DurationSec:          duration.Seconds(),
 			}); err != nil {
 				s.logger.Warn("failed to record metrics", "runner_name", job.RunnerName, "error", err)
+			} else {
+				s.logger.Info("metrics recorded",
+					"runner_name", job.RunnerName,
+					"cpu_used", jobMetrics.CPUUsedNanoCPUs,
+					"mem_peak", jobMetrics.MemPeakBytes,
+					"duration", duration.Seconds(),
+				)
 			}
 		}
 	}

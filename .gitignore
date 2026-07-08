@@ -238,3 +238,6 @@ bin/
 *.dylib
 vendor/
 go.work*
+listener
+metrics.db
+all

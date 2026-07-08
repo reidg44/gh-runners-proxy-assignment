@@ -1,6 +1,6 @@
 github:
   repository_url: "https://github.com/reidg44/gh-runners-proxy-assignment"
-  scale_set_name: "gh-proxy-runner-scaleset"
+  scale_set_name: "gh-proxy-runner-scaleset-v2"
   runner_label: "gh-proxy-runner"
   runner_group: "default"
 

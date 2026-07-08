@@ -4,13 +4,13 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/client"
+	"github.com/docker/docker/pkg/stdcopy"
 )
 
 // Collector reads resource usage metrics from a running Docker container.
@@ -98,18 +98,20 @@ func (c *DockerCollector) execRead(ctx context.Context, containerID, path string
 	}
 	defer resp.Close()
 
-	var buf bytes.Buffer
-	_, _ = io.Copy(&buf, resp.Reader)
+	// Demultiplex the Docker exec stream — raw reads include 8-byte binary
+	// frame headers that corrupt parsed output.
+	var stdout, stderr bytes.Buffer
+	_, _ = stdcopy.StdCopy(&stdout, &stderr, resp.Reader)
 
 	inspect, err := c.docker.ContainerExecInspect(ctx, execID.ID)
 	if err != nil {
 		return "", fmt.Errorf("exec inspect: %w", err)
 	}
 	if inspect.ExitCode != 0 {
-		return "", fmt.Errorf("cat %s exited with code %d", path, inspect.ExitCode)
+		return "", fmt.Errorf("cat %s exited with code %d: %s", path, inspect.ExitCode, stderr.String())
 	}
 
-	return buf.String(), nil
+	return stdout.String(), nil
 }
 
 // parseCPUStatUsageUsec extracts the usage_usec value from cgroup v2 cpu.stat content.

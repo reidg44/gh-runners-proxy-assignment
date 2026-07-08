@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"runtime"
 	"strconv"
 	"strings"
 
@@ -50,8 +51,13 @@ func New(ctx context.Context, imageName string, logger *slog.Logger) (*Provision
 	return p, nil
 }
 
-// GatewayIP returns the Docker bridge network gateway IP.
+// GatewayIP returns the address containers should use to reach the host.
+// On Docker Desktop (macOS/Windows), the bridge gateway IP doesn't route to
+// the host, so we use host.docker.internal instead.
 func (p *Provisioner) GatewayIP() string {
+	if runtime.GOOS == "darwin" || runtime.GOOS == "windows" {
+		return "host.docker.internal"
+	}
 	return p.gatewayIP
 }
 
@@ -69,7 +75,11 @@ func (p *Provisioner) StartRunner(ctx context.Context, name string, profile *con
 	resp, err := p.docker.ContainerCreate(ctx,
 		&container.Config{
 			Image: p.image,
-			Cmd:   []string{"/home/runner/run.sh"},
+			// Run the runner, then sleep briefly so the metrics collector can
+			// read cgroup files before the container stops. The JobCompleted
+			// message arrives over the network after the runner exits, so
+			// without this grace period the container would already be stopped.
+			Cmd: []string{"bash", "-c", "/home/runner/run.sh; sleep 15"},
 			Env: []string{
 				"ACTIONS_RUNNER_INPUT_JITCONFIG=" + jitConfig,
 				"https_proxy=" + proxyURL,
