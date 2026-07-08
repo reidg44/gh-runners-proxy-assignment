@@ -1,0 +1,224 @@
+name: test-stress
+# Scale/stress e2e: oversubscribe max_runners with a large mixed-profile
+# matrix and measure what degrades. Unlike test-case-10 (correctness at
+# comfortable scale), this run is designed to fail in informative ways:
+# the gate reports routing mismatch rate and queue latency, and the e2e
+# harness separately reports peak concurrent containers vs max_runners.
+#
+# Dispatch via the harness with inputs:
+#   just e2e test-stress --input total_jobs=60 --input high_cpu_count=6
+permissions:
+  contents: read
+  actions: read
+on:
+  workflow_dispatch:
+    inputs:
+      total_jobs:
+        description: "Total matrix jobs (1-256). Default oversubscribes max_runners 3x."
+        default: "30"
+      high_cpu_count:
+        description: "How many jobs are high-cpu (evenly interleaved among the rest)"
+        default: "3"
+      job_seconds:
+        description: "Seconds each job holds its runner (sleep; keeps host load low)"
+        default: "20"
+      max_queue_minutes:
+        description: "Gate fails if any job waited longer than this for a runner"
+        default: "15"
+
+env:
+  # Expected baselines from config.yaml profiles. Jobs are nearly idle
+  # (sleep), so the adaptive adjuster's baseline floor keeps these stable
+  # even with adaptive.enabled: true and a fresh metrics.db.
+  HIGH_CPUS: "4.0"
+  HIGH_MEM: "8.0 GB"
+  LOW_CPUS: "1.0"
+  LOW_MEM: "2.0 GB"
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.gen.outputs.matrix }}
+    env:
+      TOTAL: ${{ inputs.total_jobs }}
+      HIGH: ${{ inputs.high_cpu_count }}
+    steps:
+      - id: gen
+        run: |
+          [[ "$TOTAL" =~ ^[0-9]+$ && "$HIGH" =~ ^[0-9]+$ ]] || { echo "::error::total_jobs and high_cpu_count must be integers"; exit 1; }
+          [ "$TOTAL" -ge 1 ] && [ "$TOTAL" -le 256 ] || { echo "::error::total_jobs must be 1-256 (GitHub matrix limit)"; exit 1; }
+          [ "$HIGH" -le "$TOTAL" ] || { echo "::error::high_cpu_count must be <= total_jobs"; exit 1; }
+
+          # Bresenham-style interleave: index i is high-cpu iff (i*HIGH) % TOTAL < HIGH,
+          # which spreads the high-cpu jobs evenly through the queue order.
+          MATRIX=$(jq -cn --argjson t "$TOTAL" --argjson h "$HIGH" '
+            reduce range($t) as $i ({names: [], hi: 0, lo: 0};
+              if $h > 0 and (($i * $h) % $t) < $h
+              then .hi += 1 | .names += ["high-cpu-\(.hi)"]
+              else .lo += 1 | .names += ["low-cpu-\(.lo)"]
+              end) | .names')
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+          echo "Generated $TOTAL jobs ($HIGH high-cpu): $MATRIX"
+
+  stress:
+    needs: prepare
+    runs-on: ["gh-proxy-runner"]
+    # Applies once the job starts; a job that never gets a runner stays
+    # queued, which the e2e harness catches via E2E_TIMEOUT.
+    timeout-minutes: 30
+    strategy:
+      # Collect the full dataset — one mismatch must not cancel the rest.
+      fail-fast: false
+      matrix:
+        job-name: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    name: ${{ matrix.job-name }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read resource limits
+        id: limits
+        uses: ./.github/actions/read-limits
+
+      - name: Hold the runner
+        env:
+          JOB_SECONDS: ${{ inputs.job_seconds }}
+        run: |
+          [[ "$JOB_SECONDS" =~ ^[0-9]+$ ]] || { echo "::error::job_seconds must be an integer"; exit 1; }
+          sleep "$JOB_SECONDS"
+
+      - name: Record result
+        env:
+          JOB_NAME: ${{ matrix.job-name }}
+          RUNNER_NAME: ${{ runner.name }}
+          CPUS: ${{ steps.limits.outputs.cpus }}
+          MEM_DISPLAY: ${{ steps.limits.outputs.mem_display }}
+        run: |
+          # Record only — the gate job decides pass/fail so that every job
+          # contributes data even when assertions fail elsewhere.
+          if [[ "$JOB_NAME" == high-cpu* ]]; then
+            EXPECTED_CPUS="$HIGH_CPUS"; EXPECTED_MEM="$HIGH_MEM"
+          else
+            EXPECTED_CPUS="$LOW_CPUS"; EXPECTED_MEM="$LOW_MEM"
+          fi
+          echo "${JOB_NAME}|${RUNNER_NAME}|${CPUS}|${EXPECTED_CPUS}|${MEM_DISPLAY}|${EXPECTED_MEM}" \
+            > "results-${JOB_NAME}.txt"
+          echo "Job: $JOB_NAME | Runner: $RUNNER_NAME | CPUs: $CPUS (want $EXPECTED_CPUS) | Memory: $MEM_DISPLAY (want $EXPECTED_MEM)"
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: results-${{ matrix.job-name }}
+          path: results-${{ matrix.job-name }}.txt
+
+  gate:
+    needs: [prepare, stress]
+    if: ${{ always() && needs.prepare.result == 'success' }}
+    runs-on: ubuntu-latest
+    name: gate
+    env:
+      GH_TOKEN: ${{ github.token }}
+      MATRIX_JSON: ${{ needs.prepare.outputs.matrix }}
+      MAX_QUEUE_MINUTES: ${{ inputs.max_queue_minutes }}
+    steps:
+      - name: Download all results
+        uses: actions/download-artifact@v4
+        with:
+          pattern: results-*
+          merge-multiple: true
+
+      - name: Fetch per-job queue timings
+        run: |
+          # started_at - created_at = time the job waited for a runner.
+          gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/jobs?per_page=100" --paginate \
+            -q '.jobs[] | select(.name != "prepare" and .name != "gate") | [.name, .created_at, .started_at, .conclusion] | @tsv' \
+            > timings.tsv
+          wc -l timings.tsv
+
+      - name: Aggregate and gate
+        run: |
+          TOTAL=$(jq length <<< "$MATRIX_JSON")
+          HARD_FAILS=0
+
+          # ── Per-job limit + routing checks from result artifacts ──────
+          MISMATCH=0
+          MISROUTED=0
+          : > detail.md
+          for f in results-*.txt; do
+            [ -e "$f" ] || break
+            IFS='|' read -r JOB RUNNER CPUS EXP_CPUS MEM EXP_MEM < "$f"
+            ROW_STATUS="pass"
+            if [ "$CPUS" != "$EXP_CPUS" ] || [ "$MEM" != "$EXP_MEM" ]; then
+              ROW_STATUS="**LIMIT MISMATCH**"
+              MISMATCH=$((MISMATCH + 1))
+            fi
+            # Runner names encode the profile they were provisioned for
+            # (runner-<profile>-<jobid>); a class disagreement means GitHub
+            # routed the job to a runner provisioned for the other class.
+            JOB_CLASS="low-cpu"; [[ "$JOB" == high-cpu* ]] && JOB_CLASS="high-cpu"
+            if [[ "$RUNNER" != "runner-${JOB_CLASS}-"* ]]; then
+              ROW_STATUS="$ROW_STATUS, misrouted"
+              MISROUTED=$((MISROUTED + 1))
+            fi
+            echo "| ${JOB} | \`${RUNNER}\` | ${CPUS} / ${EXP_CPUS} | ${MEM} / ${EXP_MEM} | ${ROW_STATUS} |" >> detail.md
+          done
+          REPORTED=$(find . -maxdepth 1 -name 'results-*.txt' | wc -l | tr -d ' ')
+
+          # ── Queue latency from the jobs API ───────────────────────────
+          MAX_QUEUE=0; SUM_QUEUE=0; TIMED=0; NOT_SUCCESS=0
+          : > queue.md
+          while IFS=$'\t' read -r NAME CREATED STARTED CONCLUSION; do
+            [ "$CONCLUSION" = "success" ] || NOT_SUCCESS=$((NOT_SUCCESS + 1))
+            [ -n "$CREATED" ] && [ -n "$STARTED" ] && [ "$STARTED" != "null" ] || continue
+            Q=$(( $(date -d "$STARTED" +%s) - $(date -d "$CREATED" +%s) ))
+            [ "$Q" -lt 0 ] && Q=0
+            TIMED=$((TIMED + 1)); SUM_QUEUE=$((SUM_QUEUE + Q))
+            [ "$Q" -gt "$MAX_QUEUE" ] && MAX_QUEUE=$Q
+            echo "| ${NAME} | ${Q}s | ${CONCLUSION} |" >> queue.md
+          done < timings.tsv
+          AVG_QUEUE=0; [ "$TIMED" -gt 0 ] && AVG_QUEUE=$((SUM_QUEUE / TIMED))
+          QUEUE_LIMIT=$((MAX_QUEUE_MINUTES * 60))
+
+          # ── Verdict ───────────────────────────────────────────────────
+          [ "$REPORTED" -eq "$TOTAL" ] || { echo "::error::only $REPORTED/$TOTAL jobs reported results (crashed, cancelled, or never ran)"; HARD_FAILS=$((HARD_FAILS + 1)); }
+          [ "$MISMATCH" -eq 0 ] || { echo "::error::$MISMATCH job(s) ran with wrong resource limits"; HARD_FAILS=$((HARD_FAILS + 1)); }
+          [ "$NOT_SUCCESS" -eq 0 ] || { echo "::error::$NOT_SUCCESS stress job(s) did not succeed"; HARD_FAILS=$((HARD_FAILS + 1)); }
+          [ "$MAX_QUEUE" -le "$QUEUE_LIMIT" ] || { echo "::error::worst queue wait ${MAX_QUEUE}s exceeds ${QUEUE_LIMIT}s threshold"; HARD_FAILS=$((HARD_FAILS + 1)); }
+
+          {
+            echo "## Stress Test Summary"
+            echo ""
+            echo "| Metric | Value |"
+            echo "|--------|-------|"
+            echo "| Jobs dispatched | $TOTAL |"
+            echo "| Jobs reporting results | $REPORTED |"
+            echo "| Limit mismatches | $MISMATCH |"
+            echo "| Misrouted (wrong runner class) | $MISROUTED |"
+            echo "| Non-success job conclusions | $NOT_SUCCESS |"
+            echo "| Worst queue wait | ${MAX_QUEUE}s (limit ${QUEUE_LIMIT}s) |"
+            echo "| Mean queue wait | ${AVG_QUEUE}s |"
+            echo ""
+            if [ "$HARD_FAILS" -eq 0 ]; then
+              echo "**Result: PASS — all $TOTAL jobs got correct limits within the queue-time budget**"
+            else
+              echo "**Result: FAIL — $HARD_FAILS gate condition(s) violated (see errors above)**"
+            fi
+            echo ""
+            echo "<details><summary>Per-job limits and routing</summary>"
+            echo ""
+            echo "| Job | Runner | CPUs (got/want) | Memory (got/want) | Status |"
+            echo "|-----|--------|-----------------|-------------------|--------|"
+            cat detail.md
+            echo ""
+            echo "</details>"
+            echo ""
+            echo "<details><summary>Per-job queue waits</summary>"
+            echo ""
+            echo "| Job | Queue wait | Conclusion |"
+            echo "|-----|-----------|------------|"
+            cat queue.md
+            echo ""
+            echo "</details>"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          exit "$HARD_FAILS"
