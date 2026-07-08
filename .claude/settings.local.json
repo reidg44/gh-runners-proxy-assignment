@@ -2,7 +2,13 @@
   "permissions": {
     "allow": [
       "Bash(test:*)",
-      "WebFetch(domain:raw.githubusercontent.com)"
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(go build:*)",
+      "Bash(xargs -r docker rm -f)",
+      "Bash(export GITHUB_TOKEN=$\\(grep GH_TOKEN .env)",
+      "Bash(docker run:*)",
+      "Bash(xargs kill:*)",
+      "Bash(sqlite3 metrics.db \"SELECT * FROM job_metrics;\")"
     ]
   }
 }

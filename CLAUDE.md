@@ -20,6 +20,7 @@ Two components run together (combined in `cmd/all/main.go`). Each component can 
 - **`internal/state/`** — Thread-safe (`sync.RWMutex`) store tracking `RunnerInfo`: name, container ID/IP, profile, job ID/name, status (idle/busy/completed). Lookup by name, IP, or job ID.
 - **`internal/runner/`** — Docker container lifecycle. Creates containers with `NanoCPUs`/`Memory` limits on a dedicated bridge network (`gh-proxy-runners`). Passes JIT config and proxy URL as env vars. Image: `ghcr.io/actions/actions-runner:latest` with `Cmd: ["/home/runner/run.sh"]` and `User: "runner"`.
 - **`internal/scaler/`** — Custom message loop processing `JobAssigned`, `JobStarted`, `JobCompleted` messages. Uses `Statistics.TotalAssignedJobs` from each message to detect orphaned jobs (when GitHub assigns a different job to a runner than intended) and provisions additional runners to fill the gap.
+- **`internal/metrics/`** — Adaptive resource scaling. Three components: `Store` (SQLite-backed history of per-job CPU/memory usage), `DockerCollector` (reads cgroup v2/v1 metrics from containers via `docker exec`), and `Adjuster` (pure function computing adjusted CPU/memory from baseline profile + historical usage). Thresholds, scale factor, history window, and ceilings are configured in the `adaptive` section of `config.yaml`.
 
 ### Key Design Decisions
 
@@ -27,6 +28,7 @@ Two components run together (combined in `cmd/all/main.go`). Each component can 
 - **Statistics-based reconciliation** — JIT configs don't lock runners to specific jobs. GitHub may send any queued job to any registered runner. The scaler tracks `Statistics.TotalAssignedJobs` and provisions additional runners when there's a deficit vs active runner count.
 - **Message acknowledgment before processing** — Matches the official listener pattern. `DeleteMessage` is called before handling events to prevent re-delivery loops.
 - **409 conflict handling** — On stale session (409), the scale set is deleted and recreated to get a fresh session.
+- **Adaptive scaling at provisioning time** — The adjuster overrides resource values when creating containers, but `config.yaml` profiles remain the source of truth for baselines and floors. This keeps the config clean while allowing runtime optimization. SQLite stores usage history across restarts. The collector reads cgroup files (not Docker stats API) for Kubernetes portability.
 
 ## Workflow Expectations
 
@@ -68,6 +70,7 @@ The `GITHUB_TOKEN` env var must be set (PAT with `repo` + `admin:org` scopes). T
 One manually-triggered workflow (`workflow_dispatch`):
 
 - **`test-case-10.yaml`** — 10-job matrix: 1 `high-cpu` (at position #4) + 9 `low-cpu-*`, all using `["gh-proxy-runner"]` label. Each job reads cgroup CPU/memory limits, validates against expected values, and uploads results as an artifact. A downstream `summary` job collects all artifacts and publishes a single consolidated markdown table to the GitHub Actions job summary with a pass/fail verdict.
+- **`test-adaptive-scaling.yaml`** — Two-phase test: phase 1 stresses CPU/memory under `low-cpu` baseline, phase 2 verifies the adaptive system provisioned higher limits. Requires `adaptive.history_window: 1` in config. Summary job reports baseline vs adjusted limits.
 
 Verification: check the `summary` job's GitHub Actions summary for the consolidated table. Also check logs for `runner_name=runner-high-cpu-*` on high-cpu jobs and `runner_name=runner-low-cpu-*` on low-cpu jobs. Zero mismatches = success.
 

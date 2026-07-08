@@ -15,6 +15,7 @@ type Config struct {
 	Profiles       map[string]*Profile `yaml:"profiles"`
 	DefaultProfile string              `yaml:"default_profile"`
 	Proxy          ProxyConfig         `yaml:"proxy"`
+	Adaptive       AdaptiveConfig      `yaml:"adaptive"`
 
 	// OrderedProfiles is populated after loading for deterministic matching.
 	OrderedProfiles []NamedProfile `yaml:"-"`
@@ -37,10 +38,23 @@ type Profile struct {
 	CPUs          string   `yaml:"cpus"`
 	Memory        string   `yaml:"memory"`
 	MatchPatterns []string `yaml:"match_patterns"`
+	MaxCPUs       string   `yaml:"max_cpus"`
+	MaxMemory     string   `yaml:"max_memory"`
 }
 
 type ProxyConfig struct {
 	ListenAddr string `yaml:"listen_addr"`
+}
+
+type AdaptiveConfig struct {
+	Enabled            bool    `yaml:"enabled"`
+	DBPath             string  `yaml:"db_path"`
+	ScaleUpThreshold   float64 `yaml:"scale_up_threshold"`
+	ScaleDownThreshold float64 `yaml:"scale_down_threshold"`
+	ScaleFactor        float64 `yaml:"scale_factor"`
+	HistoryWindow      int     `yaml:"history_window"`
+	MaxCPUs            string  `yaml:"max_cpus"`
+	MaxMemory          string  `yaml:"max_memory"`
 }
 
 // NamedProfile pairs a profile name with its definition for ordered iteration.
@@ -110,6 +124,20 @@ func (c *Config) validate() error {
 	}
 	if os.Getenv("GITHUB_TOKEN") == "" {
 		return fmt.Errorf("GITHUB_TOKEN environment variable is required")
+	}
+	if c.Adaptive.Enabled {
+		if c.Adaptive.ScaleUpThreshold <= 0 || c.Adaptive.ScaleUpThreshold > 1 {
+			return fmt.Errorf("adaptive.scale_up_threshold must be between 0 and 1")
+		}
+		if c.Adaptive.ScaleDownThreshold < 0 || c.Adaptive.ScaleDownThreshold >= c.Adaptive.ScaleUpThreshold {
+			return fmt.Errorf("adaptive.scale_down_threshold must be >= 0 and less than scale_up_threshold")
+		}
+		if c.Adaptive.ScaleFactor <= 1 {
+			return fmt.Errorf("adaptive.scale_factor must be greater than 1")
+		}
+		if c.Adaptive.HistoryWindow <= 0 {
+			return fmt.Errorf("adaptive.history_window must be positive")
+		}
 	}
 	return nil
 }
