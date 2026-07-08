@@ -8,7 +8,7 @@
 # job that exits nonzero when any assertion fails (see README "End-to-end
 # testing" for the conventions).
 #
-# Usage: scripts/e2e.sh <workflow-name> [--keep-metrics]
+# Usage: scripts/e2e.sh <workflow-name> [--keep-metrics] [--input k=v ...]
 #   --keep-metrics  keep the existing metrics.db. By default it is moved
 #                   aside (saved in the run dir) so adaptive scaling starts
 #                   from a clean history — leftover history makes the
@@ -16,19 +16,28 @@
 #                   test workflows assert against. Not allowed for
 #                   test-adaptive-scaling, whose baselines require a
 #                   fresh history.
+#   --input k=v     pass a workflow_dispatch input (repeatable), e.g.
+#                   --input total_jobs=60 for test-stress.
 #
 # Environment: E2E_TIMEOUT (seconds, default 1800) caps the wait for the
 # workflow run.
 set -euo pipefail
 
-WORKFLOW="${1:?usage: e2e.sh <workflow-name> [--keep-metrics]}"
+WORKFLOW="${1:?usage: e2e.sh <workflow-name> [--keep-metrics] [--input k=v ...]}"
 shift
 FRESH_METRICS=true
-for arg in "$@"; do
-  case "$arg" in
+INPUT_FLAGS=()
+while [ $# -gt 0 ]; do
+  case "$1" in
     --keep-metrics) FRESH_METRICS=false ;;
-    *) echo "unknown flag: $arg" >&2; exit 2 ;;
+    --input)
+      shift
+      [ $# -gt 0 ] || { echo "--input requires key=value" >&2; exit 2; }
+      INPUT_FLAGS+=(-f "$1")
+      ;;
+    *) echo "unknown flag: $1" >&2; exit 2 ;;
   esac
+  shift
 done
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -94,7 +103,9 @@ log "starting gh-proxy (log: $RUN_DIR/gh-proxy.log)"
 "$ROOT/bin/gh-proxy" --config "$ROOT/config.yaml" >"$RUN_DIR/gh-proxy.log" 2>&1 &
 PROXY_PID=$!
 
+MONITOR_PID=""
 cleanup() {
+  [ -n "$MONITOR_PID" ] && kill "$MONITOR_PID" 2>/dev/null || true
   log "shutting down gh-proxy (pid $PROXY_PID)"
   kill "$PROXY_PID" 2>/dev/null || true
   # Graceful shutdown stops runner containers; wait for it, then force-clean.
@@ -130,10 +141,22 @@ if [ -z "$READY" ]; then
 fi
 log "system ready"
 
+# Sample concurrent runner-container counts every 5s. Peak vs max_runners
+# catches reconciliation over-provisioning (the reconcile loop has no
+# max_runners cap) — a purely local signal no workflow assertion can see.
+(
+  while :; do
+    printf '%s,%s\n' "$(date +%s)" "$(docker ps -q --filter network=gh-proxy-runners 2>/dev/null | wc -l | tr -d ' ')"
+    sleep 5
+  done
+) >"$RUN_DIR/containers.csv" &
+MONITOR_PID=$!
+
 # ── Dispatch and identify the run ────────────────────────────────────────
 PREV_RUN=$(gh run list --workflow "$WORKFLOW" --limit 1 --json databaseId -q '.[0].databaseId' 2>/dev/null || echo "")
 log "dispatching $WORKFLOW on ref $BRANCH"
-gh workflow run "$WORKFLOW" --ref "$BRANCH"
+# ${arr[@]+...} keeps empty-array expansion safe under set -u on bash 3.2 (macOS).
+gh workflow run "$WORKFLOW" --ref "$BRANCH" ${INPUT_FLAGS[@]+"${INPUT_FLAGS[@]}"}
 
 RUN_ID=""
 for _ in $(seq 1 30); do
@@ -175,6 +198,16 @@ echo
 log "per-job results:"
 gh run view "$RUN_ID" --json jobs \
   -q '.jobs[] | "  \(.conclusion)\t\(.name)"' | sort
+
+echo
+log "container concurrency (sampled every 5s):"
+PEAK=$(cut -d, -f2 "$RUN_DIR/containers.csv" 2>/dev/null | sort -n | tail -1)
+PEAK="${PEAK:-0}"
+MAX_RUNNERS=$(awk '/^\s*max_runners:/ {print $2}' "$ROOT/config.yaml")
+echo "  peak concurrent runner containers: $PEAK (config max_runners: ${MAX_RUNNERS:-?})"
+if [ -n "$MAX_RUNNERS" ] && [ "$PEAK" -gt "$MAX_RUNNERS" ]; then
+  log "WARNING: peak container count exceeded max_runners — the scaler over-provisioned (likely the uncapped reconcile loop)"
+fi
 
 echo
 log "runner assignments (from local listener log):"

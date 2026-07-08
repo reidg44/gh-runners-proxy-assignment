@@ -140,8 +140,14 @@ The verdict is the workflow run's conclusion — exit 0 means the test passed.
 ```bash
 just e2e                          # runs test-case-10
 just e2e test-adaptive-scaling
+just e2e test-stress --input total_jobs=60   # scale probe with workflow inputs
 just e2e-all                      # every e2e workflow in sequence
 ```
+
+`--input k=v` (repeatable) forwards `workflow_dispatch` inputs to the run.
+The harness also samples concurrent runner-container counts every 5 seconds
+into `containers.csv` and reports the peak against `max_runners` — a local
+signal that catches scaler over-provisioning no workflow assertion can see.
 
 Each run's listener log, run metadata, and downloaded artifacts are saved
 under `.e2e/<timestamp>-<workflow>/` for post-mortems.
@@ -186,6 +192,39 @@ just e2e test-case-10
 gh workflow run test-case-10
 gh run watch
 ```
+
+### test-stress (scale probe)
+
+Where `test-case-10` proves correctness at comfortable scale, `test-stress`
+deliberately oversubscribes the system to find where it degrades. Defaults:
+30 mixed-profile jobs (3 high-cpu evenly interleaved) against
+`max_runners: 10` — a 3× oversubscription that forces queueing. Jobs sleep
+rather than burn CPU: the stress target is the control plane (provisioning
+throughput, routing, capacity accounting), not the host, so it runs fine on
+a laptop. Idle jobs also keep the adaptive adjuster at its baseline floor,
+so limit assertions stay deterministic with `adaptive.enabled: true`.
+
+```bash
+just e2e test-stress                                            # 30 jobs, 3 high-cpu
+just e2e test-stress --input total_jobs=60 --input high_cpu_count=6
+just e2e test-stress --input job_seconds=60                     # slower churn
+```
+
+Each hypothesized scale failure maps to a measured signal:
+
+| Failure mode | Where it shows up |
+|---|---|
+| Misrouting (jobs aren't pinned to runners; GitHub hands any queued job to any idle runner) | Gate: limit-mismatch count + misrouted count (job class vs `runner.name` class) |
+| Serial provisioning latency (each JobAssigned does a GitHub API call + 3 Docker calls on the message loop) | Gate: per-job queue wait (`started_at − created_at`); fails past `max_queue_minutes` |
+| Reconciliation over-provisioning (the reconcile loop has no `max_runners` cap) | Harness: peak concurrent containers vs `max_runners` from `containers.csv` |
+| Starvation/deadlock at saturation (capacity stuck while async cleanup lags) | Jobs never start → run hangs → harness `E2E_TIMEOUT` cancels and fails |
+| Container leaks after completion storms | Harness teardown reports leftover containers on the runner network |
+
+The gate hard-fails on: missing results, any wrong-limit job, any
+non-success stress job, or a queue wait past the threshold. A failing run
+is a *finding*, not a broken test — the summary table and `containers.csv`
+say which limit was hit. `test-stress` is intentionally not part of
+`just e2e-all`.
 
 ### Verifying correct routing
 
