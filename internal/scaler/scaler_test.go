@@ -12,16 +12,21 @@ import (
 	"github.com/reidg44/gh-runners-proxy-assignment/internal/state"
 )
 
-// mockSessionClient simulates the scaleset message session.
+// mockSessionClient simulates the scaleset message session. When its messages
+// are drained it cancels the run context, ending the scaler loop.
 type mockSessionClient struct {
 	messages []*scaleset.RunnerScaleSetMessage
 	index    int
 	deleted  []int
+	cancel   context.CancelFunc
 }
 
 func (m *mockSessionClient) GetMessage(ctx context.Context, lastMessageID int, maxCapacity int) (*scaleset.RunnerScaleSetMessage, error) {
 	if m.index >= len(m.messages) {
-		return nil, ctx.Err() // return nil when no more messages
+		if m.cancel != nil {
+			m.cancel()
+		}
+		return nil, ctx.Err()
 	}
 	msg := m.messages[m.index]
 	m.index++
@@ -102,10 +107,30 @@ func zeroStats() *scaleset.RunnerScaleSetStatistic {
 	return &scaleset.RunnerScaleSetStatistic{}
 }
 
-func TestHandleJobAssignment(t *testing.T) {
+// runScaler builds a Scaler around the mocks and runs it until the session's
+// messages are drained.
+func runScaler(t *testing.T, session *mockSessionClient, jitGen *mockJITGenerator, prov *mockProvisioner, store *state.Store) {
+	t.Helper()
+	cfg := testConfig()
+	s := New(Options{
+		SessionClient: session,
+		JITGenerator:  jitGen,
+		Provisioner:   prov,
+		Classifier:    classifier.New(cfg.OrderedProfiles, cfg.DefaultProfile),
+		Store:         store,
+		Config:        cfg,
+		ScaleSetID:    42,
+		ProxyURL:      "http://proxy:8080",
+		Logger:        slog.Default(),
+	})
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	session.cancel = cancel
+	_ = s.Run(ctx)
+}
 
+func TestHandleJobAssignment(t *testing.T) {
 	session := &mockSessionClient{
 		messages: []*scaleset.RunnerScaleSetMessage{
 			{
@@ -121,21 +146,8 @@ func TestHandleJobAssignment(t *testing.T) {
 	jitGen := &mockJITGenerator{}
 	prov := &mockProvisioner{}
 	store := state.NewStore()
-	cfg := testConfig()
-	cls := classifier.New(cfg.OrderedProfiles, cfg.DefaultProfile)
-	logger := slog.Default()
 
-	s := New(session, jitGen, prov, cls, store, cfg, 42, "http://proxy:8080", nil, nil, nil, logger)
-
-	// Run scaler - it will process one message then get nil (ctx cancelled)
-	go func() {
-		// Wait for the message to be processed
-		for session.index < len(session.messages) {
-			// spin
-		}
-		cancel()
-	}()
-	_ = s.Run(ctx)
+	runScaler(t, session, jitGen, prov, store)
 
 	// Verify 2 runners were provisioned
 	if len(prov.started) != 2 {
@@ -152,8 +164,8 @@ func TestHandleJobAssignment(t *testing.T) {
 	}
 
 	// Verify runners are in the store
-	if store.Count() != 2 {
-		t.Errorf("store count=%d, want 2", store.Count())
+	if store.ActiveCount() != 2 {
+		t.Errorf("store count=%d, want 2", store.ActiveCount())
 	}
 
 	// Verify JIT configs were generated
@@ -168,9 +180,6 @@ func TestHandleJobAssignment(t *testing.T) {
 }
 
 func TestHandleJobCompleted(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
 	store := state.NewStore()
 	store.AddRunner(&state.RunnerInfo{
 		RunnerName:  "runner-low-cpu-job-2",
@@ -199,18 +208,8 @@ func TestHandleJobCompleted(t *testing.T) {
 		},
 	}
 	prov := &mockProvisioner{}
-	cfg := testConfig()
-	cls := classifier.New(cfg.OrderedProfiles, cfg.DefaultProfile)
-	logger := slog.Default()
 
-	s := New(session, &mockJITGenerator{}, prov, cls, store, cfg, 42, "http://proxy:8080", nil, nil, nil, logger)
-
-	go func() {
-		for session.index < len(session.messages) {
-		}
-		cancel()
-	}()
-	_ = s.Run(ctx)
+	runScaler(t, session, &mockJITGenerator{}, prov, store)
 
 	// Verify container was stopped
 	if len(prov.stopped) != 1 {
@@ -221,15 +220,12 @@ func TestHandleJobCompleted(t *testing.T) {
 	}
 
 	// Verify runner removed from store
-	if store.Count() != 0 {
-		t.Errorf("store count=%d, want 0", store.Count())
+	if store.ActiveCount() != 0 {
+		t.Errorf("store count=%d, want 0", store.ActiveCount())
 	}
 }
 
 func TestReconcileRunnerCount(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
 	// Simulate scenario: Statistics says 2 assigned jobs but we have 0 active runners.
 	// This happens when provisioned runners ran different jobs than intended.
 	session := &mockSessionClient{
@@ -257,18 +253,8 @@ func TestReconcileRunnerCount(t *testing.T) {
 	jitGen := &mockJITGenerator{}
 	prov := &mockProvisioner{}
 	store := state.NewStore()
-	cfg := testConfig()
-	cls := classifier.New(cfg.OrderedProfiles, cfg.DefaultProfile)
-	logger := slog.Default()
 
-	s := New(session, jitGen, prov, cls, store, cfg, 42, "http://proxy:8080", nil, nil, nil, logger)
-
-	go func() {
-		for session.index < len(session.messages) {
-		}
-		cancel()
-	}()
-	_ = s.Run(ctx)
+	runScaler(t, session, jitGen, prov, store)
 
 	// reconcileRunnerCount should have provisioned 2 runners (deficit = 2 assigned, 0 active)
 	if len(prov.started) != 2 {
@@ -281,26 +267,10 @@ func TestReconcileRunnerCount(t *testing.T) {
 			t.Errorf("reconciliation runner %d CPUs=%s, want 1 (default)", i, sc.profile)
 		}
 	}
-}
 
-func TestClassificationRouting(t *testing.T) {
-	cfg := testConfig()
-	cls := classifier.New(cfg.OrderedProfiles, cfg.DefaultProfile)
-
-	tests := []struct {
-		jobName string
-		profile string
-	}{
-		{"high-cpu", "high-cpu"},
-		{"low-cpu-1", "low-cpu"},
-		{"low-cpu-7", "low-cpu"},
-		{"unknown", "low-cpu"}, // default
-	}
-
-	for _, tt := range tests {
-		got := cls.Classify(tt.jobName)
-		if got != tt.profile {
-			t.Errorf("Classify(%q) = %q, want %q", tt.jobName, got, tt.profile)
-		}
+	// Synthetic runners must get unique names so a later reconcile pass
+	// can't collide on Docker container names.
+	if prov.started[0].name == prov.started[1].name {
+		t.Errorf("synthetic runner names collide: %q", prov.started[0].name)
 	}
 }

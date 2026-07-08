@@ -15,12 +15,15 @@ Two components run together (combined in `cmd/all/main.go`). Each component can 
 
 ### Internal Packages
 
+- **`internal/bootstrap/`** — Shared entry-point wiring: scaleset client + message session (including 409 stale-session recovery), runner group resolution, scale-set get-or-create, provisioner, adaptive-metrics components, and the scaler itself. `cmd/all` and `cmd/listener` both call `bootstrap.Setup`; construction logic lives here, not in `cmd/`.
 - **`internal/config/`** — Loads and validates `config.yaml`. Builds ordered profile list for deterministic glob matching. Checks that `default_profile` references an existing profile.
 - **`internal/classifier/`** — Matches `JobDisplayName` against each profile's `match_patterns` using `filepath.Match` (glob). First match wins; falls back to `default_profile`.
-- **`internal/state/`** — Thread-safe (`sync.RWMutex`) store tracking `RunnerInfo`: name, container ID/IP, profile, job ID/name, status (idle/busy/completed). Lookup by name, IP, or job ID.
-- **`internal/runner/`** — Docker container lifecycle. Creates containers with `NanoCPUs`/`Memory` limits on a dedicated bridge network (`gh-proxy-runners`). Passes JIT config and proxy URL as env vars. Image: `ghcr.io/actions/actions-runner:latest` with `Cmd: ["/home/runner/run.sh"]` and `User: "runner"`.
-- **`internal/scaler/`** — Custom message loop processing `JobAssigned`, `JobStarted`, `JobCompleted` messages. Uses `Statistics.TotalAssignedJobs` from each message to detect orphaned jobs (when GitHub assigns a different job to a runner than intended) and provisions additional runners to fill the gap.
-- **`internal/metrics/`** — Adaptive resource scaling. Three components: `Store` (SQLite-backed history of per-job CPU/memory usage), `DockerCollector` (reads cgroup v2/v1 metrics from containers via `docker exec`), and `Adjuster` (pure function computing adjusted CPU/memory from baseline profile + historical usage). Thresholds, scale factor, history window, and ceilings are configured in the `adaptive` section of `config.yaml`.
+- **`internal/state/`** — Thread-safe (`sync.RWMutex`) store tracking `RunnerInfo`: name, container ID/IP, profile, job ID/name, status (idle/busy). Lookup by name or container IP (IP lookups are O(1) via a secondary index — the proxy's per-connection hot path). Completed runners are removed, so `ActiveCount` is simply the tracked-runner count.
+- **`internal/runner/`** — Docker container lifecycle. Creates containers with `NanoCPUs`/`Memory` limits on a dedicated bridge network (`gh-proxy-runners`). Passes JIT config and proxy URL as env vars. Image: `ghcr.io/actions/actions-runner:latest` (pulled only if not present locally) with `Cmd: ["/home/runner/run.sh"]` and `User: "runner"`. A post-job grace period (passed by bootstrap, 15s when adaptive scaling is on, 0 otherwise) keeps containers alive after the runner exits so the metrics collector can read cgroup files.
+- **`internal/scaler/`** — Custom message loop processing `JobAssigned`, `JobStarted`, `JobCompleted` messages. Uses `Statistics.TotalAssignedJobs` from each message to detect orphaned jobs (when GitHub assigns a different job to a runner than intended) and provisions additional runners to fill the gap. Synthetic reconcile runners have an empty job display name — they use the baseline profile and never record metrics history. Job-completion cleanup (metrics collection + container stop) runs in goroutines off the message loop; `Run` waits for them before returning. `GetMessage` failures back off exponentially (1s→30s).
+- **`internal/metrics/`** — Adaptive resource scaling. Three components: `Store` (SQLite-backed history of per-job CPU/memory usage), `DockerCollector` (reads cgroup v2/v1 metrics from containers via `docker exec`), and `Adjuster` (pure function computing adjusted CPU/memory from baseline profile + historical usage; build with `NewAdjuster(cfg.Adaptive)`). Thresholds, scale factor, history window, and ceilings are configured in the `adaptive` section of `config.yaml`.
+- **`internal/units/`** — Single owner of CPU/memory string formats ("4", "1.5", "8g", "512m"): `ParseCPU`/`ParseMemory`/`FormatCPU`/`FormatMemory`. No other package parses or formats resource strings.
+- **`internal/dockerutil/`** — Shared Docker helpers: `NewClient()` (env + API version negotiation) and `ShortID()` (12-char container IDs for logging).
 
 ### Key Design Decisions
 
@@ -63,7 +66,7 @@ prek run --all-files
 
 `config.yaml` maps job display name glob patterns to resource profiles. Profiles are matched in order — first match wins.
 
-The `GITHUB_TOKEN` env var must be set (PAT with `repo` + `admin:org` scopes). The `.env` file in the repo root stores it as `GH_TOKEN`.
+The `GITHUB_TOKEN` env var must be set for `cmd/all` and `cmd/listener` (PAT with `repo` + `admin:org` scopes); it is checked in `bootstrap.Setup`, not config validation, so the standalone proxy doesn't require it. The `.env` file in the repo root stores it as `GH_TOKEN`.
 
 ## Test Infrastructure
 

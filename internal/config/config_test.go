@@ -41,7 +41,6 @@ func writeConfig(t *testing.T, content string) string {
 }
 
 func TestLoadValid(t *testing.T) {
-	t.Setenv("GITHUB_TOKEN", "test-token")
 	cfg, err := Load(writeConfig(t, validYAML))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -62,7 +61,6 @@ func TestLoadValid(t *testing.T) {
 }
 
 func TestLoadMissingFile(t *testing.T) {
-	t.Setenv("GITHUB_TOKEN", "test-token")
 	_, err := Load("/nonexistent/config.yaml")
 	if err == nil {
 		t.Fatal("expected error for missing file")
@@ -70,7 +68,6 @@ func TestLoadMissingFile(t *testing.T) {
 }
 
 func TestLoadInvalidYAML(t *testing.T) {
-	t.Setenv("GITHUB_TOKEN", "test-token")
 	_, err := Load(writeConfig(t, ":::invalid"))
 	if err == nil {
 		t.Fatal("expected error for invalid YAML")
@@ -78,7 +75,6 @@ func TestLoadInvalidYAML(t *testing.T) {
 }
 
 func TestLoadMissingDefaultProfile(t *testing.T) {
-	t.Setenv("GITHUB_TOKEN", "test-token")
 	yaml := `
 github:
   repository_url: "https://github.com/test/repo"
@@ -104,16 +100,7 @@ proxy:
 	}
 }
 
-func TestLoadMissingGitHubToken(t *testing.T) {
-	t.Setenv("GITHUB_TOKEN", "")
-	_, err := Load(writeConfig(t, validYAML))
-	if err == nil {
-		t.Fatal("expected error for missing GITHUB_TOKEN")
-	}
-}
-
 func TestLoadEmptyProfiles(t *testing.T) {
-	t.Setenv("GITHUB_TOKEN", "test-token")
 	yaml := `
 github:
   repository_url: "https://github.com/test/repo"
@@ -136,7 +123,6 @@ proxy:
 }
 
 func TestLoadProfileMissingPatterns(t *testing.T) {
-	t.Setenv("GITHUB_TOKEN", "test-token")
 	yaml := `
 github:
   repository_url: "https://github.com/test/repo"
@@ -163,7 +149,6 @@ proxy:
 }
 
 func TestLoadAdaptiveConfig(t *testing.T) {
-	t.Setenv("GITHUB_TOKEN", "test-token")
 
 	cfgYAML := `
 github:
@@ -199,13 +184,7 @@ adaptive:
   max_cpus: "16"
   max_memory: "32g"
 `
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.yaml")
-	if err := os.WriteFile(path, []byte(cfgYAML), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	cfg, err := Load(path)
+	cfg, err := Load(writeConfig(t, cfgYAML))
 	if err != nil {
 		t.Fatalf("Load() error: %v", err)
 	}
@@ -250,7 +229,6 @@ adaptive:
 }
 
 func TestLoadAdaptiveDefaults(t *testing.T) {
-	t.Setenv("GITHUB_TOKEN", "test-token")
 
 	cfgYAML := `
 github:
@@ -271,13 +249,7 @@ default_profile: "low-cpu"
 proxy:
   listen_addr: ":8080"
 `
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.yaml")
-	if err := os.WriteFile(path, []byte(cfgYAML), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	cfg, err := Load(path)
+	cfg, err := Load(writeConfig(t, cfgYAML))
 	if err != nil {
 		t.Fatalf("Load() error: %v", err)
 	}

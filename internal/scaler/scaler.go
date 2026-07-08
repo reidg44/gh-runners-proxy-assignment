@@ -10,8 +10,10 @@ import (
 	"github.com/actions/scaleset"
 	"github.com/reidg44/gh-runners-proxy-assignment/internal/classifier"
 	"github.com/reidg44/gh-runners-proxy-assignment/internal/config"
+	"github.com/reidg44/gh-runners-proxy-assignment/internal/dockerutil"
 	"github.com/reidg44/gh-runners-proxy-assignment/internal/metrics"
 	"github.com/reidg44/gh-runners-proxy-assignment/internal/state"
+	"github.com/reidg44/gh-runners-proxy-assignment/internal/units"
 )
 
 // RunnerProvisioner creates and destroys runner containers.
@@ -38,64 +40,81 @@ type pendingJob struct {
 	profile     string
 }
 
+const (
+	getMessageBaseBackoff = time.Second
+	getMessageMaxBackoff  = 30 * time.Second
+)
+
+// Options holds the dependencies for a Scaler.
+type Options struct {
+	SessionClient    SessionClient
+	JITGenerator     JITConfigGenerator
+	Provisioner      RunnerProvisioner
+	Classifier       *classifier.Classifier
+	Store            *state.Store
+	Config           *config.Config
+	ScaleSetID       int
+	ProxyURL         string
+	MetricsCollector metrics.Collector // optional; nil disables collection
+	MetricsStore     *metrics.Store    // optional; nil disables history
+	Adjuster         *metrics.Adjuster // optional; nil disables adjustment
+	Logger           *slog.Logger
+}
+
 // Scaler implements a custom message loop that inspects per-job details
 // to provision runners with appropriate resource profiles.
 type Scaler struct {
-	sessionClient SessionClient
-	jitGenerator  JITConfigGenerator
-	provisioner   RunnerProvisioner
-	classifier    *classifier.Classifier
-	store         *state.Store
-	cfg           *config.Config
-	scaleSetID    int
-	proxyURL      string
+	sessionClient    SessionClient
+	jitGenerator     JITConfigGenerator
+	provisioner      RunnerProvisioner
+	classifier       *classifier.Classifier
+	store            *state.Store
+	cfg              *config.Config
+	scaleSetID       int
+	proxyURL         string
 	metricsCollector metrics.Collector
 	metricsStore     *metrics.Store
 	adjuster         *metrics.Adjuster
-	logger        *slog.Logger
+	logger           *slog.Logger
 
-	// pendingJobs tracks assigned jobs that haven't been picked up by a runner yet.
-	// Protected by mu.
+	// completions tracks in-flight job-completion cleanup goroutines so Run
+	// doesn't return while containers are still being collected and stopped.
+	completions sync.WaitGroup
+
+	// mu protects pendingJobs and reconcileSeq.
 	mu          sync.Mutex
 	pendingJobs map[string]*pendingJob // jobID -> pendingJob
+	// reconcileSeq gives synthetic reconcile runners unique names across
+	// reconcile passes.
+	reconcileSeq int
 }
 
 // New creates a new Scaler.
-func New(
-	sessionClient SessionClient,
-	jitGenerator JITConfigGenerator,
-	provisioner RunnerProvisioner,
-	classifier *classifier.Classifier,
-	store *state.Store,
-	cfg *config.Config,
-	scaleSetID int,
-	proxyURL string,
-	metricsCollector metrics.Collector,
-	metricsStore *metrics.Store,
-	adjuster *metrics.Adjuster,
-	logger *slog.Logger,
-) *Scaler {
+func New(opts Options) *Scaler {
 	return &Scaler{
-		sessionClient:    sessionClient,
-		jitGenerator:     jitGenerator,
-		provisioner:      provisioner,
-		classifier:       classifier,
-		store:            store,
-		cfg:              cfg,
-		scaleSetID:       scaleSetID,
-		proxyURL:         proxyURL,
-		metricsCollector: metricsCollector,
-		metricsStore:     metricsStore,
-		adjuster:         adjuster,
-		logger:           logger,
+		sessionClient:    opts.SessionClient,
+		jitGenerator:     opts.JITGenerator,
+		provisioner:      opts.Provisioner,
+		classifier:       opts.Classifier,
+		store:            opts.Store,
+		cfg:              opts.Config,
+		scaleSetID:       opts.ScaleSetID,
+		proxyURL:         opts.ProxyURL,
+		metricsCollector: opts.MetricsCollector,
+		metricsStore:     opts.MetricsStore,
+		adjuster:         opts.Adjuster,
+		logger:           opts.Logger,
 		pendingJobs:      make(map[string]*pendingJob),
 	}
 }
 
 // Run starts the message processing loop. It blocks until the context is cancelled.
 func (s *Scaler) Run(ctx context.Context) error {
+	defer s.completions.Wait()
+
 	lastMessageID := 0
 	maxCapacity := s.cfg.Runner.MaxRunners
+	backoff := getMessageBaseBackoff
 
 	s.logger.Info("scaler started", "max_capacity", maxCapacity)
 
@@ -104,15 +123,13 @@ func (s *Scaler) Run(ctx context.Context) error {
 			return ctx.Err()
 		}
 
-		availableCapacity := maxCapacity - s.store.ActiveCount()
-		if availableCapacity < 0 {
-			availableCapacity = 0
-		}
+		activeRunners := s.store.ActiveCount()
+		availableCapacity := max(maxCapacity-activeRunners, 0)
 
 		s.logger.Debug("polling for messages",
 			"last_message_id", lastMessageID,
 			"available_capacity", availableCapacity,
-			"active_runners", s.store.ActiveCount(),
+			"active_runners", activeRunners,
 			"pending_jobs", len(s.pendingJobs),
 		)
 
@@ -121,9 +138,18 @@ func (s *Scaler) Run(ctx context.Context) error {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
-			s.logger.Error("failed to get message", "error", err)
+			s.logger.Error("failed to get message", "error", err, "retry_in", backoff)
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(backoff):
+			}
+			if backoff *= 2; backoff > getMessageMaxBackoff {
+				backoff = getMessageMaxBackoff
+			}
 			continue
 		}
+		backoff = getMessageBaseBackoff
 
 		// No messages (202 response from long poll)
 		if msg == nil {
@@ -212,6 +238,10 @@ func (s *Scaler) handleJobAssigned(ctx context.Context, job *scaleset.JobAssigne
 	return s.provisionRunner(ctx, job.JobDisplayName, job.JobID, profileName, profile)
 }
 
+// provisionRunner creates a JIT config and starts a runner container.
+// jobDisplayName may be empty for synthetic reconcile runners that have no
+// job identity; those always use the baseline profile and never record
+// metrics history.
 func (s *Scaler) provisionRunner(ctx context.Context, jobDisplayName, jobID, profileName string, profile *config.Profile) error {
 	// Generate JIT runner config
 	runnerName := fmt.Sprintf("runner-%s-%s", profileName, jobID)
@@ -225,7 +255,7 @@ func (s *Scaler) provisionRunner(ctx context.Context, jobDisplayName, jobID, pro
 
 	// Determine effective profile — apply adaptive adjustment if available.
 	effectiveProfile := profile
-	if s.adjuster != nil && s.metricsStore != nil {
+	if s.adjuster != nil && s.metricsStore != nil && jobDisplayName != "" {
 		history, err := s.metricsStore.GetHistory(jobDisplayName, s.adjuster.HistoryWindow)
 		if err != nil {
 			s.logger.Warn("failed to get metrics history, using baseline", "job_display_name", jobDisplayName, "error", err)
@@ -260,7 +290,7 @@ func (s *Scaler) provisionRunner(ctx context.Context, jobDisplayName, jobID, pro
 
 	s.logger.Info("runner provisioned",
 		"runner_name", runnerName,
-		"container_id", truncateID(containerID),
+		"container_id", dockerutil.ShortID(containerID),
 		"profile", profileName,
 		"job_display_name", jobDisplayName,
 	)
@@ -280,13 +310,6 @@ func (s *Scaler) handleJobStarted(job *scaleset.JobStarted) {
 	s.mu.Lock()
 	delete(s.pendingJobs, job.JobID)
 	s.mu.Unlock()
-}
-
-func truncateID(id string) string {
-	if len(id) > 12 {
-		return id[:12]
-	}
-	return id
 }
 
 func (s *Scaler) handleJobCompleted(ctx context.Context, job *scaleset.JobCompleted) {
@@ -309,57 +332,75 @@ func (s *Scaler) handleJobCompleted(ctx context.Context, job *scaleset.JobComple
 		return
 	}
 
-	s.store.MarkCompleted(job.RunnerName)
-
 	runner, ok := s.store.GetByName(job.RunnerName)
 	if !ok {
 		s.logger.Warn("completed job for unknown runner", "runner_name", job.RunnerName)
 		return
 	}
 
-	// Collect and record metrics before stopping the container.
-	if s.metricsCollector != nil && s.metricsStore != nil {
-		duration := time.Since(runner.StartedAt)
-		if duration <= 0 {
-			duration = time.Second
+	// Collect metrics and stop the container off the message loop: metrics
+	// collection is several docker execs and ContainerStop can wait out the
+	// full SIGTERM timeout, which would otherwise block processing of new
+	// job assignments. WithoutCancel so cleanup finishes during shutdown;
+	// Run waits for these goroutines before returning.
+	cleanupCtx := context.WithoutCancel(ctx)
+	s.completions.Go(func() {
+		s.collectAndRecord(cleanupCtx, runner)
+
+		if err := s.provisioner.StopRunner(cleanupCtx, runner.ContainerID); err != nil {
+			s.logger.Error("failed to stop runner container",
+				"runner_name", runner.RunnerName,
+				"container_id", runner.ContainerID,
+				"error", err,
+			)
 		}
 
-		jobMetrics, err := s.metricsCollector.Collect(ctx, runner.ContainerID, duration)
-		if err != nil {
-			s.logger.Warn("failed to collect metrics", "runner_name", job.RunnerName, "error", err)
-		} else {
-			allocCPU := int64(metrics.ParseCPUToNano(runner.AllocatedCPUs))
-			allocMem := int64(metrics.ParseMemToBytes(runner.AllocatedMemory))
-			if err := s.metricsStore.Record(&metrics.MetricsRecord{
-				JobName:              runner.JobName,
-				Profile:              runner.Profile,
-				CPUAllocatedNanoCPUs: allocCPU,
-				MemAllocatedBytes:    allocMem,
-				CPUUsedNanoCPUs:      jobMetrics.CPUUsedNanoCPUs,
-				MemPeakBytes:         jobMetrics.MemPeakBytes,
-				DurationSec:          duration.Seconds(),
-			}); err != nil {
-				s.logger.Warn("failed to record metrics", "runner_name", job.RunnerName, "error", err)
-			} else {
-				s.logger.Info("metrics recorded",
-					"runner_name", job.RunnerName,
-					"cpu_used", jobMetrics.CPUUsedNanoCPUs,
-					"mem_peak", jobMetrics.MemPeakBytes,
-					"duration", duration.Seconds(),
-				)
-			}
-		}
+		s.store.Remove(runner.RunnerName)
+	})
+}
+
+// collectAndRecord reads the completed container's cgroup metrics and records
+// them in the history store. Synthetic reconcile runners (empty JobName) are
+// skipped — they have no job identity to record history under.
+func (s *Scaler) collectAndRecord(ctx context.Context, runner *state.RunnerInfo) {
+	if s.metricsCollector == nil || s.metricsStore == nil || runner.JobName == "" {
+		return
 	}
 
-	if err := s.provisioner.StopRunner(ctx, runner.ContainerID); err != nil {
-		s.logger.Error("failed to stop runner container",
-			"runner_name", job.RunnerName,
-			"container_id", runner.ContainerID,
-			"error", err,
-		)
+	duration := time.Since(runner.StartedAt)
+	if duration <= 0 {
+		duration = time.Second
 	}
 
-	s.store.Remove(job.RunnerName)
+	jobMetrics, err := s.metricsCollector.Collect(ctx, runner.ContainerID, duration)
+	if err != nil {
+		s.logger.Warn("failed to collect metrics", "runner_name", runner.RunnerName, "error", err)
+		return
+	}
+
+	// Allocated values were produced by units.Format* (or validated config),
+	// so parse failures are not expected; a zero is recorded if they occur.
+	allocCPU, _ := units.ParseCPU(runner.AllocatedCPUs)
+	allocMem, _ := units.ParseMemory(runner.AllocatedMemory)
+	if err := s.metricsStore.Record(&metrics.MetricsRecord{
+		JobName:              runner.JobName,
+		Profile:              runner.Profile,
+		CPUAllocatedNanoCPUs: allocCPU,
+		MemAllocatedBytes:    allocMem,
+		CPUUsedNanoCPUs:      jobMetrics.CPUUsedNanoCPUs,
+		MemPeakBytes:         jobMetrics.MemPeakBytes,
+		DurationSec:          duration.Seconds(),
+	}); err != nil {
+		s.logger.Warn("failed to record metrics", "runner_name", runner.RunnerName, "error", err)
+		return
+	}
+
+	s.logger.Info("metrics recorded",
+		"runner_name", runner.RunnerName,
+		"cpu_used", jobMetrics.CPUUsedNanoCPUs,
+		"mem_peak", jobMetrics.MemPeakBytes,
+		"duration", duration.Seconds(),
+	)
 }
 
 // reconcileRunnerCount uses Statistics to detect when we need more runners
@@ -383,7 +424,8 @@ func (s *Scaler) reconcileRunnerCount(ctx context.Context, stats *scaleset.Runne
 	)
 
 	// Try to use pending job profiles for classification.
-	// If we don't have enough pending jobs, use default profile.
+	// If we don't have enough pending jobs, provision synthetic runners on
+	// the default profile with no job identity.
 	s.mu.Lock()
 	pendingList := make([]*pendingJob, 0, len(s.pendingJobs))
 	for _, pj := range s.pendingJobs {
@@ -391,7 +433,7 @@ func (s *Scaler) reconcileRunnerCount(ctx context.Context, stats *scaleset.Runne
 	}
 	s.mu.Unlock()
 
-	for i := 0; i < deficit; i++ {
+	for i := range deficit {
 		var profileName string
 		var jobDisplayName string
 		var jobID string
@@ -403,8 +445,10 @@ func (s *Scaler) reconcileRunnerCount(ctx context.Context, stats *scaleset.Runne
 			jobID = pj.jobID
 		} else {
 			profileName = s.cfg.DefaultProfile
-			jobDisplayName = "unknown-reconcile"
-			jobID = fmt.Sprintf("reconcile-%d", i)
+			s.mu.Lock()
+			jobID = fmt.Sprintf("reconcile-%d", s.reconcileSeq)
+			s.reconcileSeq++
+			s.mu.Unlock()
 		}
 
 		profile, ok := s.cfg.Profiles[profileName]

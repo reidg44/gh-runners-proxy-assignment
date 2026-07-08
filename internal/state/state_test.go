@@ -26,9 +26,6 @@ func TestAddAndGetByName(t *testing.T) {
 	if r.Status != StatusIdle {
 		t.Errorf("got status=%q, want idle", r.Status)
 	}
-	if r.CreatedAt.IsZero() {
-		t.Error("CreatedAt should be set")
-	}
 }
 
 func TestGetByContainerIP(t *testing.T) {
@@ -48,23 +45,31 @@ func TestGetByContainerIP(t *testing.T) {
 	}
 }
 
-func TestGetByJobID(t *testing.T) {
+func TestGetByContainerIPAfterRemove(t *testing.T) {
 	s := NewStore()
-	s.AddRunner(&RunnerInfo{
-		RunnerName: "runner-1",
-		JobID:      "job-42",
-	})
+	s.AddRunner(&RunnerInfo{RunnerName: "runner-1", ContainerIP: "172.18.0.2"})
+	s.Remove("runner-1")
 
-	r, ok := s.GetByJobID("job-42")
-	if !ok {
-		t.Fatal("runner not found by job ID")
-	}
-	if r.RunnerName != "runner-1" {
-		t.Errorf("got name=%q, want runner-1", r.RunnerName)
+	if _, ok := s.GetByContainerIP("172.18.0.2"); ok {
+		t.Error("IP lookup should fail after runner removed")
 	}
 }
 
-func TestLifecycleTransitions(t *testing.T) {
+func TestAddRunnerReplacesIPIndex(t *testing.T) {
+	s := NewStore()
+	s.AddRunner(&RunnerInfo{RunnerName: "runner-1", ContainerIP: "172.18.0.2"})
+	// Re-register the same runner name with a new container IP.
+	s.AddRunner(&RunnerInfo{RunnerName: "runner-1", ContainerIP: "172.18.0.3"})
+
+	if _, ok := s.GetByContainerIP("172.18.0.2"); ok {
+		t.Error("stale IP should no longer resolve")
+	}
+	if r, ok := s.GetByContainerIP("172.18.0.3"); !ok || r.RunnerName != "runner-1" {
+		t.Errorf("new IP should resolve to runner-1, got %v ok=%v", r, ok)
+	}
+}
+
+func TestMarkBusy(t *testing.T) {
 	s := NewStore()
 	s.AddRunner(&RunnerInfo{RunnerName: "runner-1"})
 
@@ -81,15 +86,6 @@ func TestLifecycleTransitions(t *testing.T) {
 	if r.StartedAt.IsZero() {
 		t.Error("StartedAt should be set after MarkBusy")
 	}
-
-	s.MarkCompleted("runner-1")
-	r, _ = s.GetByName("runner-1")
-	if r.Status != StatusCompleted {
-		t.Fatalf("after MarkCompleted status=%q, want completed", r.Status)
-	}
-	if r.CompletedAt.IsZero() {
-		t.Error("CompletedAt should be set after MarkCompleted")
-	}
 }
 
 func TestRemove(t *testing.T) {
@@ -103,22 +99,19 @@ func TestRemove(t *testing.T) {
 	}
 }
 
-func TestCountAndActiveCount(t *testing.T) {
+func TestActiveCount(t *testing.T) {
 	s := NewStore()
 	s.AddRunner(&RunnerInfo{RunnerName: "runner-1"})
 	s.AddRunner(&RunnerInfo{RunnerName: "runner-2"})
 	s.AddRunner(&RunnerInfo{RunnerName: "runner-3"})
 
-	if s.Count() != 3 {
-		t.Errorf("Count()=%d, want 3", s.Count())
-	}
 	if s.ActiveCount() != 3 {
 		t.Errorf("ActiveCount()=%d, want 3", s.ActiveCount())
 	}
 
-	s.MarkCompleted("runner-3")
+	s.Remove("runner-3")
 	if s.ActiveCount() != 2 {
-		t.Errorf("ActiveCount()=%d, want 2 after completion", s.ActiveCount())
+		t.Errorf("ActiveCount()=%d, want 2 after removal", s.ActiveCount())
 	}
 }
 
@@ -130,23 +123,19 @@ func TestNotFound(t *testing.T) {
 	if _, ok := s.GetByContainerIP("0.0.0.0"); ok {
 		t.Error("should not find by nonexistent IP")
 	}
-	if _, ok := s.GetByJobID("nope"); ok {
-		t.Error("should not find by nonexistent job ID")
-	}
 }
 
 func TestMarkNonexistent(t *testing.T) {
 	s := NewStore()
 	// Should not panic
 	s.MarkBusy("nope")
-	s.MarkCompleted("nope")
 }
 
 func TestConcurrentAccess(t *testing.T) {
 	s := NewStore()
 	var wg sync.WaitGroup
 
-	for i := 0; i < 100; i++ {
+	for i := range 100 {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
@@ -155,9 +144,7 @@ func TestConcurrentAccess(t *testing.T) {
 			s.GetByName(name)
 			s.MarkBusy(name)
 			s.GetByContainerIP("172.18.0.2")
-			s.MarkCompleted(name)
 			s.All()
-			s.Count()
 			s.ActiveCount()
 		}(i)
 	}

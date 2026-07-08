@@ -11,6 +11,7 @@ import (
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/pkg/stdcopy"
+	"github.com/reidg44/gh-runners-proxy-assignment/internal/dockerutil"
 )
 
 // Collector reads resource usage metrics from a running Docker container.
@@ -41,43 +42,54 @@ func NewDockerCollector(docker client.APIClient) *DockerCollector {
 func (c *DockerCollector) Collect(ctx context.Context, containerID string, duration time.Duration) (*JobMetrics, error) {
 	metrics := &JobMetrics{}
 
-	cpuContent, err := c.execRead(ctx, containerID, "/sys/fs/cgroup/cpu.stat")
-	if err == nil {
-		usageUsec, parseErr := parseCPUStatUsageUsec(cpuContent)
-		if parseErr == nil {
-			metrics.CPUUsedNanoCPUs = usageUsecToNanoCPUs(usageUsec, duration)
-		}
-	} else {
-		v1Content, v1Err := c.execRead(ctx, containerID, "/sys/fs/cgroup/cpu/cpuacct.usage")
-		if v1Err == nil {
-			nanos, parseErr := parseCPUAcctUsage(v1Content)
-			if parseErr == nil {
-				metrics.CPUUsedNanoCPUs = cpuAcctNanosToNanoCPUs(nanos, duration)
-			}
-		}
+	if cpu, err := c.collectCPU(ctx, containerID, duration); err == nil {
+		metrics.CPUUsedNanoCPUs = cpu
 	}
-
-	memContent, err := c.execRead(ctx, containerID, "/sys/fs/cgroup/memory.peak")
-	if err == nil {
-		peakBytes, parseErr := parseMemoryPeak(memContent)
-		if parseErr == nil {
-			metrics.MemPeakBytes = peakBytes
-		}
-	} else {
-		v1Content, v1Err := c.execRead(ctx, containerID, "/sys/fs/cgroup/memory/memory.max_usage_in_bytes")
-		if v1Err == nil {
-			peakBytes, parseErr := parseMemoryPeak(v1Content)
-			if parseErr == nil {
-				metrics.MemPeakBytes = peakBytes
-			}
-		}
+	if mem, err := c.collectMemory(ctx, containerID); err == nil {
+		metrics.MemPeakBytes = mem
 	}
 
 	if metrics.CPUUsedNanoCPUs == 0 && metrics.MemPeakBytes == 0 {
-		return nil, fmt.Errorf("no cgroup metrics found in container %s", containerID[:12])
+		return nil, fmt.Errorf("no cgroup metrics found in container %s", dockerutil.ShortID(containerID))
 	}
 
 	return metrics, nil
+}
+
+// collectCPU reads average CPU usage, trying the cgroup v2 file first and
+// falling back to the v1 path only when the v2 file can't be read.
+func (c *DockerCollector) collectCPU(ctx context.Context, containerID string, duration time.Duration) (int64, error) {
+	if content, err := c.execRead(ctx, containerID, "/sys/fs/cgroup/cpu.stat"); err == nil {
+		usageUsec, err := parseCPUStatUsageUsec(content)
+		if err != nil {
+			return 0, err
+		}
+		return usageUsecToNanoCPUs(usageUsec, duration), nil
+	}
+
+	content, err := c.execRead(ctx, containerID, "/sys/fs/cgroup/cpu/cpuacct.usage")
+	if err != nil {
+		return 0, err
+	}
+	nanos, err := parseCPUAcctUsage(content)
+	if err != nil {
+		return 0, err
+	}
+	return cpuAcctNanosToNanoCPUs(nanos, duration), nil
+}
+
+// collectMemory reads peak memory usage, trying the cgroup v2 file first and
+// falling back to the v1 path only when the v2 file can't be read.
+func (c *DockerCollector) collectMemory(ctx context.Context, containerID string) (int64, error) {
+	if content, err := c.execRead(ctx, containerID, "/sys/fs/cgroup/memory.peak"); err == nil {
+		return parseMemoryPeak(content)
+	}
+
+	content, err := c.execRead(ctx, containerID, "/sys/fs/cgroup/memory/memory.max_usage_in_bytes")
+	if err != nil {
+		return 0, err
+	}
+	return parseMemoryPeak(content)
 }
 
 // execRead runs `cat path` inside the container and returns the output as a string.
@@ -116,7 +128,7 @@ func (c *DockerCollector) execRead(ctx context.Context, containerID, path string
 
 // parseCPUStatUsageUsec extracts the usage_usec value from cgroup v2 cpu.stat content.
 func parseCPUStatUsageUsec(content string) (int64, error) {
-	for _, line := range strings.Split(content, "\n") {
+	for line := range strings.SplitSeq(content, "\n") {
 		parts := strings.Fields(line)
 		if len(parts) == 2 && parts[0] == "usage_usec" {
 			return strconv.ParseInt(parts[1], 10, 64)

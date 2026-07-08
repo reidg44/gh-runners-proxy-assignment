@@ -122,9 +122,6 @@ func (c *Config) validate() error {
 	if c.Proxy.ListenAddr == "" {
 		return fmt.Errorf("proxy.listen_addr is required")
 	}
-	if os.Getenv("GITHUB_TOKEN") == "" {
-		return fmt.Errorf("GITHUB_TOKEN environment variable is required")
-	}
 	if c.Adaptive.Enabled {
 		if c.Adaptive.ScaleUpThreshold <= 0 || c.Adaptive.ScaleUpThreshold > 1 {
 			return fmt.Errorf("adaptive.scale_up_threshold must be between 0 and 1")

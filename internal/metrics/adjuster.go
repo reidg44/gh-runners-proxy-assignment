@@ -2,11 +2,10 @@ package metrics
 
 import (
 	"fmt"
-	"math"
-	"strconv"
 	"strings"
 
 	"github.com/reidg44/gh-runners-proxy-assignment/internal/config"
+	"github.com/reidg44/gh-runners-proxy-assignment/internal/units"
 )
 
 // Adjuster computes adjusted CPU and memory resources for a profile based on
@@ -20,11 +19,42 @@ type Adjuster struct {
 	MaxMemory          string
 }
 
+// NewAdjuster builds an Adjuster from the adaptive section of the config.
+func NewAdjuster(cfg config.AdaptiveConfig) *Adjuster {
+	return &Adjuster{
+		ScaleUpThreshold:   cfg.ScaleUpThreshold,
+		ScaleDownThreshold: cfg.ScaleDownThreshold,
+		ScaleFactor:        cfg.ScaleFactor,
+		HistoryWindow:      cfg.HistoryWindow,
+		MaxCPUs:            cfg.MaxCPUs,
+		MaxMemory:          cfg.MaxMemory,
+	}
+}
+
 // AdjustedResources holds the result of an Adjust call.
 type AdjustedResources struct {
 	CPUs   string
 	Memory string
 	Reason string
+}
+
+// cpuNano and memBytes parse resource strings tolerantly: config values are
+// validated elsewhere, so a parse failure here (e.g. an unset ceiling) is
+// treated as 0 rather than an error.
+func cpuNano(s string) float64 {
+	v, err := units.ParseCPU(s)
+	if err != nil {
+		return 0
+	}
+	return float64(v)
+}
+
+func memBytes(s string) float64 {
+	v, err := units.ParseMemory(s)
+	if err != nil {
+		return 0
+	}
+	return float64(v)
 }
 
 // Adjust computes new resource allocations given a baseline profile and historical
@@ -52,8 +82,8 @@ func (a *Adjuster) Adjust(baseline *config.Profile, history []MetricsRecord) *Ad
 	lastCPU := float64(history[0].CPUAllocatedNanoCPUs)
 	lastMem := float64(history[0].MemAllocatedBytes)
 
-	baselineCPUNano := ParseCPUToNano(baseline.CPUs)
-	baselineMemBytes := ParseMemToBytes(baseline.Memory)
+	baselineCPUNano := cpuNano(baseline.CPUs)
+	baselineMemBytes := memBytes(baseline.Memory)
 
 	if lastCPU == 0 {
 		lastCPU = baselineCPUNano
@@ -62,16 +92,16 @@ func (a *Adjuster) Adjust(baseline *config.Profile, history []MetricsRecord) *Ad
 		lastMem = baselineMemBytes
 	}
 
-	maxCPUNano := ParseCPUToNano(a.MaxCPUs)
-	maxMemBytes := ParseMemToBytes(a.MaxMemory)
+	maxCPUNano := cpuNano(a.MaxCPUs)
+	maxMemBytes := memBytes(a.MaxMemory)
 
 	if baseline.MaxCPUs != "" {
-		if profileMax := ParseCPUToNano(baseline.MaxCPUs); profileMax < maxCPUNano {
+		if profileMax := cpuNano(baseline.MaxCPUs); profileMax < maxCPUNano {
 			maxCPUNano = profileMax
 		}
 	}
 	if baseline.MaxMemory != "" {
-		if profileMax := ParseMemToBytes(baseline.MaxMemory); profileMax < maxMemBytes {
+		if profileMax := memBytes(baseline.MaxMemory); profileMax < maxMemBytes {
 			maxMemBytes = profileMax
 		}
 	}
@@ -113,68 +143,5 @@ func (a *Adjuster) Adjust(baseline *config.Profile, history []MetricsRecord) *Ad
 		reason = strings.Join(reasons, "; ")
 	}
 
-	return &AdjustedResources{CPUs: formatCPU(newCPU), Memory: formatMemory(newMem), Reason: reason}
-}
-
-// ParseCPUToNano converts a CPU string like "4" or "1.5" to nanocpus. Exported for use by scaler.
-func ParseCPUToNano(cpus string) float64 {
-	f, err := strconv.ParseFloat(cpus, 64)
-	if err != nil {
-		return 0
-	}
-	return f * 1e9
-}
-
-// ParseMemToBytes converts a memory string like "8g" or "512m" to bytes. Exported for use by scaler.
-func ParseMemToBytes(mem string) float64 {
-	mem = strings.TrimSpace(mem)
-	if len(mem) == 0 {
-		return 0
-	}
-	suffix := strings.ToLower(mem[len(mem)-1:])
-	numStr := mem[:len(mem)-1]
-	num, err := strconv.ParseFloat(numStr, 64)
-	if err != nil {
-		b, err2 := strconv.ParseFloat(mem, 64)
-		if err2 != nil {
-			return 0
-		}
-		return b
-	}
-	switch suffix {
-	case "g":
-		return num * 1024 * 1024 * 1024
-	case "m":
-		return num * 1024 * 1024
-	case "k":
-		return num * 1024
-	default:
-		b, _ := strconv.ParseFloat(mem, 64)
-		return b
-	}
-}
-
-// formatCPU converts nanocpus back to a human-readable CPU string (e.g., "2", "1.5", "2.25").
-func formatCPU(nanoCPUs float64) string {
-	cpus := nanoCPUs / 1e9
-	if cpus == math.Trunc(cpus) {
-		return strconv.Itoa(int(cpus))
-	}
-	s := strconv.FormatFloat(cpus, 'f', 2, 64)
-	s = strings.TrimRight(s, "0")
-	s = strings.TrimRight(s, ".")
-	return s
-}
-
-// formatMemory converts bytes back to a human-readable memory string (e.g., "8g", "512m").
-func formatMemory(bytes float64) string {
-	gb := bytes / (1024 * 1024 * 1024)
-	if gb == math.Trunc(gb) && gb >= 1 {
-		return fmt.Sprintf("%dg", int(gb))
-	}
-	mb := bytes / (1024 * 1024)
-	if mb == math.Trunc(mb) && mb >= 1 {
-		return fmt.Sprintf("%dm", int(mb))
-	}
-	return strconv.FormatInt(int64(bytes), 10)
+	return &AdjustedResources{CPUs: units.FormatCPU(newCPU), Memory: units.FormatMemory(newMem), Reason: reason}
 }

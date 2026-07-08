@@ -58,11 +58,13 @@ func (s *Store) Record(r *MetricsRecord) error {
 // GetHistory returns up to limit recent MetricsRecords for the given jobName,
 // ordered most-recent first.
 func (s *Store) GetHistory(jobName string, limit int) ([]MetricsRecord, error) {
+	// id is monotonic (AUTOINCREMENT), so ordering by it alone lets the
+	// (job_name, id) index satisfy the query without a sort.
 	rows, err := s.db.Query(`
 		SELECT job_name, profile, cpu_allocated_nanocpus, mem_allocated_bytes, cpu_used_nanocpus, mem_peak_bytes, duration_sec
 		FROM job_metrics
 		WHERE job_name = ?
-		ORDER BY created_at DESC, id DESC
+		ORDER BY id DESC
 		LIMIT ?`,
 		jobName, limit,
 	)
@@ -96,7 +98,7 @@ func createSchema(db *sql.DB) error {
 			duration_sec            REAL,
 			created_at              TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 		);
-		CREATE INDEX IF NOT EXISTS idx_job_name ON job_metrics(job_name);
+		CREATE INDEX IF NOT EXISTS idx_job_name_id ON job_metrics(job_name, id DESC);
 	`)
 	if err != nil {
 		return fmt.Errorf("creating schema: %w", err)
