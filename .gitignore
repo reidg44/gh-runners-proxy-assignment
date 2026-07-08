@@ -241,3 +241,6 @@ go.work*
 listener
 metrics.db
 all
+
+# e2e harness output (logs, artifacts, saved metrics dbs)
+.e2e/

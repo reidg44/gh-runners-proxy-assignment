@@ -130,7 +130,41 @@ The system will:
 
 ## Testing
 
-A test workflow is included using `workflow_dispatch` (manual trigger).
+### End-to-end testing (one command)
+
+The e2e harness does everything: builds the binary, starts the full system,
+dispatches the workflow, waits for it to finish, prints per-job results and
+runner assignments, and tears everything down (including runner containers).
+The verdict is the workflow run's conclusion — exit 0 means the test passed.
+
+```bash
+just e2e                          # runs test-case-10
+just e2e test-adaptive-scaling    # resets metrics.db automatically
+just e2e-all                      # every e2e workflow in sequence
+```
+
+Each run's listener log, run metadata, and downloaded artifacts are saved
+under `.e2e/<timestamp>-<workflow>/` for post-mortems.
+
+**Conventions for adding a new e2e workflow** (what the harness relies on):
+
+1. Trigger with `workflow_dispatch` and target `runs-on: ["gh-proxy-runner"]`.
+2. Matrix job `name`s become `JobDisplayName` — they must match a profile's
+   `match_patterns` in `config.yaml` to be classified (e.g. `low-cpu-*`).
+3. Read limits with the shared composite action
+   `./.github/actions/read-limits` (after `actions/checkout`) instead of
+   copy-pasting cgroup detection.
+4. End with a summary/gate job on `ubuntu-latest` that downloads the result
+   artifacts, writes a table to `$GITHUB_STEP_SUMMARY`, and **exits nonzero
+   on any failed assertion**. The harness's pass/fail signal is the run
+   conclusion, so a test that doesn't gate can never fail.
+5. Lint with `go run github.com/rhysd/actionlint/cmd/actionlint@latest
+   .github/workflows/*.yaml` (custom runner label is declared in
+   `.github/actionlint.yaml`).
+
+Note: `gh workflow run` executes the workflow file from the **remote** ref,
+so workflow changes must be committed and pushed before they take effect.
+The harness warns when local `.github/` differs from origin.
 
 ### test-case-10 (10 jobs)
 
@@ -139,7 +173,9 @@ A test workflow is included using `workflow_dispatch` (manual trigger).
 Each job self-validates by reading cgroup CPU/memory limits and comparing them against expected values based on its name. Results are uploaded as artifacts. A downstream `summary` job collects all results and publishes a single consolidated markdown table to the GitHub Actions job summary with a pass/fail verdict — making it easy to verify all 10 jobs at a glance.
 
 ```bash
-# With the system running:
+just e2e test-case-10
+
+# Or manually, with the system already running:
 gh workflow run test-case-10
 gh run watch
 ```

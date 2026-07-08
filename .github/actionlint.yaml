@@ -1,0 +1,5 @@
+# Configuration for actionlint (https://github.com/rhysd/actionlint)
+self-hosted-runner:
+  # Label served by the gh-proxy scale set (config.yaml: github.runner_label)
+  labels:
+    - gh-proxy-runner

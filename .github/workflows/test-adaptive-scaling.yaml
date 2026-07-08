@@ -5,10 +5,13 @@ on:
   workflow_dispatch:
 
 # Two-phase test for adaptive resource scaling.
-# Prerequisite: system running with adaptive.enabled=true, adaptive.history_window=1
+# Prerequisite: system running with adaptive.enabled=true, adaptive.history_window=1,
+# and a fresh metrics.db (the harness enforces both: `just e2e test-adaptive-scaling`).
 #
 # Phase 1 (stress): Jobs run under low-cpu profile (1 CPU, 2g) and consume
 #   resources above the 80% scale_up_threshold.
+# Settle: buffer so the listener can collect and record phase-1 cgroup metrics
+#   (collection happens after JobCompleted arrives) before phase 2 provisions.
 # Phase 2 (verify): Same job names run again. The adaptive system should
 #   provision higher limits based on phase 1 metrics.
 
@@ -23,47 +26,11 @@ jobs:
           - low-cpu-stress-mem
     name: ${{ matrix.job-name }}
     steps:
+      - uses: actions/checkout@v4
+
       - name: Record baseline limits
         id: baseline
-        run: |
-          # Detect CPU limit
-          if [ -f /sys/fs/cgroup/cpu.max ]; then
-            read QUOTA PERIOD < /sys/fs/cgroup/cpu.max
-            if [ "$QUOTA" != "max" ]; then
-              CPUS=$(awk "BEGIN {printf \"%.1f\", $QUOTA / $PERIOD}")
-            else
-              CPUS=$(nproc).0
-            fi
-          elif [ -f /sys/fs/cgroup/cpu/cpu.cfs_quota_us ]; then
-            QUOTA=$(cat /sys/fs/cgroup/cpu/cpu.cfs_quota_us)
-            PERIOD=$(cat /sys/fs/cgroup/cpu/cpu.cfs_period_us)
-            if [ "$QUOTA" != "-1" ]; then
-              CPUS=$(awk "BEGIN {printf \"%.1f\", $QUOTA / $PERIOD}")
-            else
-              CPUS=$(nproc).0
-            fi
-          else
-            CPUS=$(nproc).0
-          fi
-
-          # Detect memory limit
-          if [ -f /sys/fs/cgroup/memory.max ]; then
-            MEM_BYTES=$(cat /sys/fs/cgroup/memory.max)
-            if [ "$MEM_BYTES" = "max" ]; then
-              MEM_GB="unlimited"
-            else
-              MEM_GB=$(awk "BEGIN {printf \"%.1f\", $MEM_BYTES / 1073741824}")
-            fi
-          elif [ -f /sys/fs/cgroup/memory/memory.limit_in_bytes ]; then
-            MEM_BYTES=$(cat /sys/fs/cgroup/memory/memory.limit_in_bytes)
-            MEM_GB=$(awk "BEGIN {printf \"%.1f\", $MEM_BYTES / 1073741824}")
-          else
-            MEM_GB="unknown"
-          fi
-
-          echo "cpus=$CPUS" >> "$GITHUB_OUTPUT"
-          echo "mem_gb=$MEM_GB" >> "$GITHUB_OUTPUT"
-          echo "Phase 1 baseline: CPUs=$CPUS Memory=${MEM_GB}GB"
+        uses: ./.github/actions/read-limits
 
       - name: Stress CPU
         if: matrix.job-name == 'low-cpu-stress-cpu'
@@ -91,9 +58,21 @@ jobs:
           name: phase1-${{ matrix.job-name }}
           path: phase1-${{ matrix.job-name }}.txt
 
+  # ── Settle: give the listener time to record phase-1 metrics ──
+  # Metrics are collected from the container's cgroup after the JobCompleted
+  # message arrives; if phase 2 were provisioned before that lands in
+  # metrics.db, the adjuster would still see empty history and use baselines.
+  settle:
+    needs: [stress]
+    runs-on: ubuntu-latest
+    name: settle
+    steps:
+      - name: Wait for metrics collection
+        run: sleep 30
+
   # ── Phase 2: Verify adaptive system provisioned higher limits ──
   verify:
-    needs: [stress]
+    needs: [settle]
     runs-on: ["gh-proxy-runner"]
     strategy:
       matrix:
@@ -102,47 +81,11 @@ jobs:
           - low-cpu-stress-mem
     name: ${{ matrix.job-name }}
     steps:
+      - uses: actions/checkout@v4
+
       - name: Check adjusted limits
         id: adjusted
-        run: |
-          # Detect CPU limit
-          if [ -f /sys/fs/cgroup/cpu.max ]; then
-            read QUOTA PERIOD < /sys/fs/cgroup/cpu.max
-            if [ "$QUOTA" != "max" ]; then
-              CPUS=$(awk "BEGIN {printf \"%.1f\", $QUOTA / $PERIOD}")
-            else
-              CPUS=$(nproc).0
-            fi
-          elif [ -f /sys/fs/cgroup/cpu/cpu.cfs_quota_us ]; then
-            QUOTA=$(cat /sys/fs/cgroup/cpu/cpu.cfs_quota_us)
-            PERIOD=$(cat /sys/fs/cgroup/cpu/cpu.cfs_period_us)
-            if [ "$QUOTA" != "-1" ]; then
-              CPUS=$(awk "BEGIN {printf \"%.1f\", $QUOTA / $PERIOD}")
-            else
-              CPUS=$(nproc).0
-            fi
-          else
-            CPUS=$(nproc).0
-          fi
-
-          # Detect memory limit
-          if [ -f /sys/fs/cgroup/memory.max ]; then
-            MEM_BYTES=$(cat /sys/fs/cgroup/memory.max)
-            if [ "$MEM_BYTES" = "max" ]; then
-              MEM_GB="unlimited"
-            else
-              MEM_GB=$(awk "BEGIN {printf \"%.1f\", $MEM_BYTES / 1073741824}")
-            fi
-          elif [ -f /sys/fs/cgroup/memory/memory.limit_in_bytes ]; then
-            MEM_BYTES=$(cat /sys/fs/cgroup/memory/memory.limit_in_bytes)
-            MEM_GB=$(awk "BEGIN {printf \"%.1f\", $MEM_BYTES / 1073741824}")
-          else
-            MEM_GB="unknown"
-          fi
-
-          echo "cpus=$CPUS" >> "$GITHUB_OUTPUT"
-          echo "mem_gb=$MEM_GB" >> "$GITHUB_OUTPUT"
-          echo "Phase 2 limits: CPUs=$CPUS Memory=${MEM_GB}GB"
+        uses: ./.github/actions/read-limits
 
       - name: Validate CPU scale-up
         if: matrix.job-name == 'low-cpu-stress-cpu'
@@ -218,7 +161,7 @@ jobs:
 
           for f in phase1-*.txt; do
             [ -f "$f" ] || continue
-            IFS='|' read -r JOB PHASE CPUS MEM_GB RUNNER < "$f"
+            IFS='|' read -r JOB _ CPUS MEM_GB RUNNER < "$f"
             echo "| ${JOB} | \`${RUNNER}\` | ${CPUS} | ${MEM_GB} GB |" >> summary.md
           done
 
@@ -232,7 +175,7 @@ jobs:
 
           for f in phase2-*.txt; do
             [ -f "$f" ] || continue
-            IFS='|' read -r JOB PHASE CPUS MEM_GB RUNNER CPU_ST MEM_ST < "$f"
+            IFS='|' read -r JOB _ CPUS MEM_GB RUNNER CPU_ST MEM_ST < "$f"
 
             if [ "$CPU_ST" != "pass" ] && [ "$CPU_ST" != "n/a" ]; then
               FAIL_COUNT=$((FAIL_COUNT + 1))

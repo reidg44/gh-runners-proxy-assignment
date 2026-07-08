@@ -39,25 +39,25 @@ Two components run together (combined in `cmd/all/main.go`). Each component can 
 
 ## Build and Run Commands
 
+Prefer the `justfile` targets:
+
 ```bash
-# Build
+just build                        # go build -o bin/gh-proxy ./cmd/all
+just test                         # go test ./...
+just lint                         # go vet + prek run --all-files
+just run                          # start the system (requires Docker + GH_TOKEN in .env)
+just e2e                          # full e2e: test-case-10 (see Test Infrastructure)
+just e2e test-adaptive-scaling    # full e2e: adaptive scaling
+```
+
+Raw equivalents:
+
+```bash
 go build -o bin/gh-proxy ./cmd/all
-
-# Run all tests
 go test ./internal/...
-
-# Run specific package tests
-go test ./internal/scaler/...
-go test ./internal/classifier/...
-
-# Start the system (requires Docker running + GITHUB_TOKEN set)
 export GITHUB_TOKEN=$(grep GH_TOKEN .env | cut -d= -f2)
 ./bin/gh-proxy --config config.yaml
-
-# Trigger test workflow
 gh workflow run test-case-10     # 10 jobs: 1 high-cpu at #4, 9 low-cpu
-
-# Lint and format
 go vet ./internal/...
 prek run --all-files
 ```
@@ -70,12 +70,16 @@ The `GITHUB_TOKEN` env var must be set for `cmd/all` and `cmd/listener` (PAT wit
 
 ## Test Infrastructure
 
-One manually-triggered workflow (`workflow_dispatch`):
+**Run e2e tests with `just e2e <workflow>`** — `scripts/e2e.sh` handles preflight checks (Docker, gh auth, config), builds and starts the system, dispatches the workflow, waits for the conclusion, prints per-job results plus runner assignments, and tears down. Exit 0 = pass. Logs/artifacts land in `.e2e/<timestamp>-<workflow>/`. Note `gh workflow run` uses the workflow file from the **remote** ref — workflow edits need commit+push before they take effect (the harness warns about this).
 
-- **`test-case-10.yaml`** — 10-job matrix: 1 `high-cpu` (at position #4) + 9 `low-cpu-*`, all using `["gh-proxy-runner"]` label. Each job reads cgroup CPU/memory limits, validates against expected values, and uploads results as an artifact. A downstream `summary` job collects all artifacts and publishes a single consolidated markdown table to the GitHub Actions job summary with a pass/fail verdict.
-- **`test-adaptive-scaling.yaml`** — Two-phase test: phase 1 stresses CPU/memory under `low-cpu` baseline, phase 2 verifies the adaptive system provisioned higher limits. Requires `adaptive.history_window: 1` in config. Summary job reports baseline vs adjusted limits.
+Two manually-triggered workflows (`workflow_dispatch`):
 
-Verification: check the `summary` job's GitHub Actions summary for the consolidated table. Also check logs for `runner_name=runner-high-cpu-*` on high-cpu jobs and `runner_name=runner-low-cpu-*` on low-cpu jobs. Zero mismatches = success.
+- **`test-case-10.yaml`** — 10-job matrix: 1 `high-cpu` (at position #4) + 9 `low-cpu-*`, all using `["gh-proxy-runner"]` label. Each job reads cgroup CPU/memory limits (via the shared `./.github/actions/read-limits` composite action), validates against expected values, and uploads results as an artifact. A downstream `summary` job collects all artifacts and publishes a single consolidated markdown table to the GitHub Actions job summary with a pass/fail verdict.
+- **`test-adaptive-scaling.yaml`** — Two-phase test: phase 1 stresses CPU/memory under `low-cpu` baseline, a `settle` job waits 30s for the listener to record phase-1 metrics, phase 2 verifies the adaptive system provisioned higher limits. Requires `adaptive.enabled: true` and `adaptive.history_window: 1` in config, and a fresh `metrics.db` (the harness enforces all three). Summary job reports baseline vs adjusted limits.
+
+**Conventions for new e2e workflows** (documented in README "End-to-end testing"): matrix job names must match profile `match_patterns`; use the `read-limits` composite action instead of copy-pasting cgroup detection; always end with a gate job that exits nonzero on failed assertions — the harness's verdict is the run conclusion. Lint with actionlint (`go run github.com/rhysd/actionlint/cmd/actionlint@latest .github/workflows/*.yaml`; custom label declared in `.github/actionlint.yaml`).
+
+Manual verification (when not using the harness): check the `summary` job's GitHub Actions summary for the consolidated table. Also check logs for `runner_name=runner-high-cpu-*` on high-cpu jobs and `runner_name=runner-low-cpu-*` on low-cpu jobs. Zero mismatches = success.
 
 ## Environment
 
