@@ -23,6 +23,14 @@
 # workflow run.
 set -euo pipefail
 
+# macOS: prevent idle sleep for the duration of the run. A host suspend
+# freezes Docker and the listener mid-run and manifests as a mysterious
+# stall — observed live: two 60-job runs "deadlocked" (runners exited with
+# stale broker sessions, jobs orphaned) because the laptop went to sleep.
+if [ "$(uname)" = "Darwin" ] && [ -z "${E2E_CAFFEINATED:-}" ] && command -v caffeinate >/dev/null 2>&1; then
+  E2E_CAFFEINATED=1 exec caffeinate -i "$0" "$@"
+fi
+
 WORKFLOW="${1:?usage: e2e.sh <workflow-name> [--keep-metrics] [--input k=v ...]}"
 shift
 FRESH_METRICS=true
@@ -203,7 +211,8 @@ echo
 log "container concurrency (sampled every 5s):"
 PEAK=$(cut -d, -f2 "$RUN_DIR/containers.csv" 2>/dev/null | sort -n | tail -1)
 PEAK="${PEAK:-0}"
-MAX_RUNNERS=$(awk '/^\s*max_runners:/ {print $2}' "$ROOT/config.yaml")
+# [[:space:]] not \s — macOS awk has no \s
+MAX_RUNNERS=$(awk '/^[[:space:]]*max_runners:/ {print $2}' "$ROOT/config.yaml")
 echo "  peak concurrent runner containers: $PEAK (config max_runners: ${MAX_RUNNERS:-?})"
 if [ -n "$MAX_RUNNERS" ] && [ "$PEAK" -gt "$MAX_RUNNERS" ]; then
   log "WARNING: peak container count exceeded max_runners — the scaler over-provisioned (likely the uncapped reconcile loop)"

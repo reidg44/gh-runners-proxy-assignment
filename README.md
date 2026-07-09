@@ -177,7 +177,12 @@ you deliberately want history to accumulate across runs.
 
 Note: `gh workflow run` executes the workflow file from the **remote** ref,
 so workflow changes must be committed and pushed before they take effect.
-The harness warns when local `.github/` differs from origin.
+The harness warns when local `.github/` differs from origin. Additionally, a
+**new** `workflow_dispatch`-only workflow is not dispatchable at all until its
+file exists on the default branch (`main`) — GitHub only registers workflows
+from there ("could not find any workflows named ..."). Land the file on
+`main` once; after that, dispatching with `--ref <branch>` uses the branch's
+version.
 
 ### test-case-10 (10 jobs)
 
@@ -225,6 +230,25 @@ non-success stress job, or a queue wait past the threshold. A failing run
 is a *finding*, not a broken test — the summary table and `containers.csv`
 say which limit was hit. `test-stress` is intentionally not part of
 `just e2e-all`.
+
+**Confirmed findings from the first campaign (2026-07):**
+
+- *Misrouting is real under queue pressure.* Jobs are not pinned to
+  runners — GitHub's broker gives the queue-head job to whichever runner
+  registers first. With 60 jobs against `max_runners: 6`, 17% of jobs ran
+  with the wrong profile's limits (symmetric high/low swaps). Runs that
+  route perfectly do so because wave size happens to align with the
+  high-cpu interleave; the single-label classify-and-provision design is
+  probabilistic, not guaranteed, once jobs queue.
+- *`max_runners` must be sized to real host memory.* Each runner container
+  uses ~500-700MB of the Docker VM regardless of its profile limits.
+  Oversubscribing the VM (10 runners on 7.75GiB) doesn't error — every job
+  silently runs 3-10x slower. There is no admission control tied to host
+  capacity.
+- *Container stop latency gates slot turnover.* The runner command traps
+  SIGTERM so `docker stop` returns in ~1s; without it every completion
+  held a capacity slot for Docker's full 10s SIGKILL timeout, capping
+  steady-state throughput at ~55% of `max_runners`.
 
 ### Verifying correct routing
 

@@ -6,7 +6,10 @@ github:
 
 runner:
   image: "ghcr.io/actions/actions-runner:latest"
-  max_runners: 10
+  # Size to real host capacity: each runner uses ~500-700MB of the Docker
+  # VM's memory (7.75GiB here) regardless of its profile limit. 10 runners
+  # thrash the VM and every job slows 3-10x with no error anywhere.
+  max_runners: 6
   work_folder: "_work"
 
 profiles:

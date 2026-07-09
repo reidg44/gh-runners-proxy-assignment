@@ -355,6 +355,15 @@ func (s *Scaler) handleJobCompleted(ctx context.Context, job *scaleset.JobComple
 			)
 		}
 
+		// The capacity slot is released only after the container is gone.
+		// Releasing it earlier (before StopRunner) deadlocks under load:
+		// JIT runners are pre-registered at config-generation time, so
+		// advertising free capacity while dying runners are still
+		// registered makes GitHub assign jobs to registrations that are
+		// about to vanish — those assignments orphan, replacement runners
+		// idle out and exit, and no further messages arrive (observed
+		// live: 5 orphaned assignments, 37-minute stall). Stop latency is
+		// kept low by the SIGTERM trap in the runner command instead.
 		s.store.Remove(runner.RunnerName)
 	})
 }

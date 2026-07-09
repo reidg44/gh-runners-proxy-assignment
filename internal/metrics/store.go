@@ -30,6 +30,12 @@ func NewStore(dbPath string) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("opening metrics db: %w", err)
 	}
+	// One connection serializes writers: concurrent job-completion
+	// goroutines otherwise race on inserts and lose records to
+	// SQLITE_BUSY (observed live under a 60-job burst). It also keeps
+	// ":memory:" coherent — each pooled connection would otherwise get
+	// its own empty database.
+	db.SetMaxOpenConns(1)
 	if err := createSchema(db); err != nil {
 		db.Close()
 		return nil, err

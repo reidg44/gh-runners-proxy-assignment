@@ -87,7 +87,11 @@ func (p *Provisioner) StartRunner(ctx context.Context, name string, profile *con
 
 	cmd := "/home/runner/run.sh"
 	if p.postJobGrace > 0 {
-		cmd = fmt.Sprintf("%s; sleep %d", cmd, int(p.postJobGrace.Seconds()))
+		// PID 1 only receives SIGTERM if a handler is installed, and bash
+		// runs traps only after the foreground command finishes — so docker
+		// stop lets run.sh finish cleanly, then interrupts the grace sleep
+		// immediately instead of waiting out Docker's 10s SIGKILL timeout.
+		cmd = fmt.Sprintf("trap 'exit 0' TERM; %s; sleep %d & wait $!", cmd, int(p.postJobGrace.Seconds()))
 	}
 
 	resp, err := p.docker.ContainerCreate(ctx,

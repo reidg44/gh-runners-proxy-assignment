@@ -225,6 +225,97 @@ func TestHandleJobCompleted(t *testing.T) {
 	}
 }
 
+// blockingProvisioner parks StopRunner until released, so tests can observe
+// store state mid-stop.
+type blockingProvisioner struct {
+	mockProvisioner
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (b *blockingProvisioner) StopRunner(ctx context.Context, containerID string) error {
+	close(b.entered)
+	<-b.release
+	return b.mockProvisioner.StopRunner(ctx, containerID)
+}
+
+// TestCapacityHeldUntilContainerStopped pins the cleanup ordering: the
+// runner's capacity slot must NOT be freed until the container stop
+// completes. Freeing it earlier deadlocks under load — JIT runners are
+// pre-registered at config-generation time, so advertising capacity while
+// dying runners are still registered makes GitHub assign jobs to
+// registrations that are about to vanish (observed live: orphaned
+// assignments and a 37-minute stall).
+func TestCapacityHeldUntilContainerStopped(t *testing.T) {
+	store := state.NewStore()
+	store.AddRunner(&state.RunnerInfo{
+		RunnerName:  "runner-low-cpu-job-2",
+		ContainerID: "container-abc",
+		Profile:     "low-cpu",
+		JobID:       "job-2",
+		JobName:     "low-cpu-1",
+	})
+
+	session := &mockSessionClient{
+		messages: []*scaleset.RunnerScaleSetMessage{
+			{
+				MessageID:  1,
+				Statistics: zeroStats(),
+				JobCompletedMessages: []*scaleset.JobCompleted{
+					{
+						Result:     "success",
+						RunnerName: "runner-low-cpu-job-2",
+						JobMessageBase: scaleset.JobMessageBase{
+							JobDisplayName: "low-cpu-1",
+							JobID:          "job-2",
+						},
+					},
+				},
+			},
+		},
+	}
+	prov := &blockingProvisioner{
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+
+	cfg := testConfig()
+	s := New(Options{
+		SessionClient: session,
+		JITGenerator:  &mockJITGenerator{},
+		Provisioner:   prov,
+		Classifier:    classifier.New(cfg.OrderedProfiles, cfg.DefaultProfile),
+		Store:         store,
+		Config:        cfg,
+		ScaleSetID:    42,
+		ProxyURL:      "http://proxy:8080",
+		Logger:        slog.Default(),
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	session.cancel = cancel
+	done := make(chan struct{})
+	go func() {
+		_ = s.Run(ctx)
+		close(done)
+	}()
+
+	<-prov.entered
+	if got := store.ActiveCount(); got != 1 {
+		t.Errorf("capacity slot released during container stop: ActiveCount=%d, want 1", got)
+	}
+	close(prov.release)
+	<-done
+
+	if len(prov.stopped) != 1 || prov.stopped[0] != "container-abc" {
+		t.Errorf("stopped containers=%v, want [container-abc]", prov.stopped)
+	}
+	if got := store.ActiveCount(); got != 0 {
+		t.Errorf("capacity slot not released after container stop: ActiveCount=%d, want 0", got)
+	}
+}
+
 func TestReconcileRunnerCount(t *testing.T) {
 	// Simulate scenario: Statistics says 2 assigned jobs but we have 0 active runners.
 	// This happens when provisioned runners ran different jobs than intended.
